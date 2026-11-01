@@ -1,0 +1,22 @@
+# ============================================================================
+# dsh-fish-atme —— bundle patch（插件自带的挂载声明）
+# ============================================================================
+# 装上之后，profile 只要在 dsh.profile.bundles 里列出 dsh-fish-atme 即生效。
+# 下面这行的 id 必须等于 index.js 里 `export const name`（= 'fish-atme'）：
+# DSH 的设置层用「entry id == 插件命名空间」来认领 Config，对不上就改不了参数。
+#
+# 这里只放一份「安全的默认值」，故意不是最激进的那档：
+# 一天 3 条、两条间隔 10 分钟、只回号主本人、真的会发（想先观察就把 dryRun 打开）。
+# 真正的用户配置在插件 Config 里（设置页可改），也可以在 config 里直接写。
+# ============================================================================
+
+- insert:
+    - id: fish-atme
+      name: dsh-fish-atme
+      config:
+        enabled: true
+        intervalMinutes: 5
+        maxPerDay: 3
+        minGapMinutes: 10
+        maxChars: 80
+        dryRun: false

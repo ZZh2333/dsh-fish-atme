@@ -1,0 +1,8 @@
+node_modules/
+*.log
+.DS_Store
+Thumbs.db
+# 本地数据（凭证 / 状态 / 配置）
+fish-atme-config.json
+fish-atme-state.json
+bili_credential.json
