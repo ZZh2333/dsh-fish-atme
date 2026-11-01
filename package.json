@@ -1,36 +1,32 @@
 {
   "name": "dsh-fish-atme",
-  "version": "0.1.0",
-  "description": "DSH 插件：盯着 B 站「@我的」，只回你本人 —— 定时轮询 + 模型写回复 + 三道安全闸，参数可在设置页改",
+  "version": "0.2.0",
+  "description": "DSH 插件：盯着 B 站「@我的」，只回你本人 —— 定时轮询 + 人格化回复 + 三道安全闸",
   "keywords": [
     "dsh",
     "dsh-plugin",
     "deepseek-harness",
     "bilibili",
     "at-me",
-    "auto-reply",
-    "cordis"
+    "auto-reply"
   ],
   "license": "MIT",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./client": "./client.js"
   },
   "files": [
     "index.js",
-    "client.js",
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE",
-    "tests"
+    "tests",
+    "client.js",
+    "CHANGELOG.md"
   ],
-  "scripts": {
-    "test": "node tests/offline.mjs"
-  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -42,14 +38,6 @@
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-settings-plugins"
       ]
-    }
-  },
-  "peerDependencies": {
-    "@deepseek-ai/schemastery": "*"
-  },
-  "peerDependenciesMeta": {
-    "@deepseek-ai/schemastery": {
-      "optional": true
     }
   },
   "engines": {

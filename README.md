@@ -7,7 +7,7 @@
 - 类型：DSH bundle（宿主半端 `index.js` + 浏览器半端 `client.js`）
 - 语言：纯 JavaScript（ESM，无构建步骤）
 - 许可证：MIT
-- 版本：0.1.0
+- 版本：0.2.0
 
 ---
 
@@ -26,6 +26,7 @@
 - [目录结构](#目录结构)
 - [开发与测试](#开发与测试)
 - [常见问题](#常见问题)
+- [更新日志](#更新日志)
 - [许可证](#许可证)
 
 ---
@@ -268,6 +269,9 @@ dsh plugin --profile <profile> add dsh-fish-atme
 | 失败即抛 | 接口 `code != 0` 当失败处理，不会假装发成功 |
 | 单飞 | 同一时刻只跑一轮（`busy` 锁），不会并发回复 |
 | 额度不预支 | 只有真的处理成功才 `count += 1` |
+| 配置防呆 | `allowUids` 留空时设置页标黄：*「现在只会回你自己 @ 自己」*（这是 0.2.0 加的，踩过坑） |
+| 保存不误伤 | 设置页只提交你**真的动过**的字段，不会把别处改过的配置盖回旧值 |
+| 配置热读 | 每次进设置页接口都重读配置文件，手改 JSON 也不会看到过期值 |
 
 建议再叠一层：`intervalMinutes ≥ 5`、`maxPerDay ≤ 5`、先 `dryRun` 跑一天。
 
@@ -308,9 +312,15 @@ node tests/offline.mjs      # 或 npm test
 
 离线测试不碰网络：把 `fetch` 换掉验请求形状，把 `setInterval` 换掉验定时器装卸，用临时目录验配置落盘。
 
-改代码后热重载（不用重启 DSH）：在插件管理里把该条目关掉再打开即可。
+改完代码的生效方式，按改的是哪一半分：
 
-**加了 `client.js` 的改动例外**：浏览器半端在 DSH 启动时扫描，改完要重启一次。
+| 改了什么 | 怎么生效 |
+|---|---|
+| 宿主半端 `index.js` / `lib/` | 插件管理里把该条目**关掉再打开**（不会自动热重载），之后刷新页面看设置页 |
+| 浏览器半端 `client.js` | 同上关/开一次 + **刷新页面** |
+| 第一次给插件加 `dsh.client` 声明 | 改完要**重启一次 DSH**（清单只在启动时读） |
+
+> 这两条是实测出来的：改完 `client.js` 只刷新页面看不到新代码，得先把插件关/开一次。
 
 ---
 
@@ -344,13 +354,31 @@ node tests/offline.mjs      # 或 npm test
 cd dsh-fish-atme
 git init -b main
 git add -A
-git commit -m "feat: dsh-fish-atme 0.1.0"
+git commit -m "fix(atme): 设置页保存不再覆盖白名单，空白名单给出警告（0.2.0）"
 git remote add origin git@github.com:<你的账号>/dsh-fish-atme.git
 git push -u origin main
 ```
 
 - 已经在用 npm 的话：`npm publish`（`package.json` 里建议补上 `repository` / `homepage` / `bugs` 三个字段，指向你的仓库）。
 - 提交前跑一遍 `node tests/offline.mjs`，并确认没有把 `bili_credential.json`、`fish-atme-*.json` 提交上去（`.gitignore` 已经挡了）。
+
+---
+
+## 更新日志
+
+完整记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 0.2.0（2026-11-02）
+
+- 修复：设置页保存会把 `allowUids` 等字段**用旧值盖回去**（白名单被清空 ⇒ 一条都不回）
+- 修复：设置页接口读的是启动时的内存快照，手改配置文件后显示过期值
+- 新增：白名单为空时设置页标黄警告
+- 修复：`index.js` 改完不会自动热重载，README 里写清楚关/开一次的操作
+
+### 0.1.0（2026-11-01）
+
+- 首个版本：定时轮询「@我的」、三道安全闸（白名单 / 额度 / 间隔 + 去重）、
+  人格化回复、3 个模型工具、13 个可改参数、设置页。
 
 ---
 

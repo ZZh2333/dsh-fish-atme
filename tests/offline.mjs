@@ -39,26 +39,26 @@ if (Config !== undefined) {
 
 // ── tidyReply ────────────────────────────────────────────────────────────
 eq('剥引号', tidyReply('“海底真好看”', 80), '海底真好看')
-eq('剥 @ 前缀', tidyReply('@某个用户 海底真好看', 80), '海底真好看')
+eq('剥 @ 前缀', tidyReply('@测试用户 海底真好看', 80), '海底真好看')
 eq('压成一行', tidyReply('第一行\n\n第二行', 80), '第一行 第二行')
 ok('超长截断', tidyReply('鱼'.repeat(50), 10).length === 10)
 eq('纯空白给空串', tidyReply('  \n ', 80), '')
 
 // ── normalize：字段映射（照 2026-11-01 实测）──────────────────────────────
 const n = normalize({
-  user: { mid: 123456789, nickname: '某个用户' },
-  at_time: 1793522340,
-  item: { subject_id: 100000000000001, source_id: 200000000001, source_content: '@机器人号 来看看', title: '某视频' },
+  user: { mid: 12345678, nickname: '测试用户' },
+  at_time: 1790000000,
+  item: { subject_id: 100000000000001, source_id: 318880000001, source_content: '@测试账号 来看看', title: '某视频' },
 })
-eq('from', n.from, '某个用户')
-eq('mid', n.mid, '123456789')
-eq('rpid 取 source_id', n.rpid, '200000000001')
+eq('from', n.from, '测试用户')
+eq('mid', n.mid, '12345678')
+eq('rpid 取 source_id', n.rpid, '318880000001')
 eq('aid 取 subject_id', n.aid, '100000000000001')
-eq('text', n.text, '@机器人号 来看看')
+eq('text', n.text, '@测试账号 来看看')
 
 // ── allowSet：白名单解析 ─────────────────────────────────────────────────
 eq('空配置回落到登录账号自己', [...allowSet({ allowUids: [] }, '10000000')], ['10000000'])
-eq('逗号/空格都能拆', [...allowSet({ allowUids: ['123456789, 12345 678'] }, '10000000')], ['123456789', '12345', '678'])
+eq('逗号/空格都能拆', [...allowSet({ allowUids: ['12345678, 12345 678'] }, '10000000')], ['12345678', '12345', '678'])
 eq('非数字会被丢掉', [...allowSet({ allowUids: ['abc', '999'] }, '10000000')], ['999'])
 
 // ── normalizeConfig：volatile 占位对象必须回落默认（血泪教训）──────────────
@@ -73,7 +73,7 @@ eq('非数字会被丢掉', [...allowSet({ allowUids: ['abc', '999'] }, '1000000
 }
 
 // ── resolveHome ──────────────────────────────────────────────────────────
-eq('home 没配时回落到默认目录', resolveHome({ home: '' }).endsWith('fish-atme'), true)
+eq('home 没配时回落到默认目录', resolveHome({ home: '' }).endsWith('bili-duty'), true)
 eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
 
 // ── postReply：请求形状（拦 fetch，不真发）────────────────────────────────

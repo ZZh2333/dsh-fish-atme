@@ -129,14 +129,32 @@ window.__ModuleLoader__.load({
 
       const cfg = state?.config ?? {}
       const status = state?.status ?? {}
-      const patch = (key, value) => setState((s) => (s ? { ...s, config: { ...s.config, [key]: value } } : s))
+      // 只提交「这一次真的动过」的字段。
+      // 教训（2026-11-02 00:34）：整份 config 提交时，页面缓存的旧 state 会把
+      // 别处改过的值（比如白名单）原样盖回去 —— 白名单被清成 []，定时器就一条都不回了。
+      const [dirty, setDirty] = React.useState(() => new Set())
+      const patch = (key, value) => {
+        setDirty((prev) => new Set(prev).add(key))
+        setState((s) => (s ? { ...s, config: { ...s.config, [key]: value } } : s))
+      }
 
       const save = async () => {
         setBusy('save')
         setMsg(null)
         try {
-          const next = await jpost('/config', { config: { ...cfg, allowUids: cfg.allowUids ?? [] } })
+          const payload = {}
+          for (const key of dirty) payload[key] = cfg[key]
+          if (!Object.keys(payload).length) {
+            setMsg({ text: '没有改动，不用保存', })
+            return
+          }
+          // 先拉一次最新状态，再只覆盖自己改过的键
+          const fresh = await jget('/state')
+          const merged = { ...(fresh?.config ?? {}) }
+          for (const key of dirty) merged[key] = cfg[key]
+          const next = await jpost('/config', { config: merged })
           setState(next)
+          setDirty(new Set())
           setMsg({ text: '已保存并生效（定时器按新参数重启）', good: true })
         } catch (e) {
           setMsg({ text: '保存失败：' + String(e?.message ?? e), bad: true })
@@ -227,10 +245,17 @@ window.__ModuleLoader__.load({
             h('span', { 'data-fa-num': '' },
               h(Text, {
                 value: (cfg.allowUids ?? []).join(','),
-                placeholder: '123456789',
+                placeholder: '12345678',
                 onChange: (v) => patch('allowUids', String(v).split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean)),
               })),
           ),
+          // 2026-11-02 踩过的坑：留空不是"全都回"，而是"只回你自己"，看上去在跑其实一条都不回
+          (Array.isArray(cfg.allowUids) && cfg.allowUids.length === 0)
+            ? h('div', {
+                'data-fa-note': '',
+                style: { color: '#a16207', background: '#fef9c3', padding: '4px 8px', borderRadius: '4px' },
+              }, '⚠️ 白名单是空的：现在只会回「你自己 @ 自己」，别人的 @ 一条都不会回。要回谁就把他 UID 填进来。')
+            : null,
         ),
 
         // ── 语气 ──
@@ -242,7 +267,7 @@ window.__ModuleLoader__.load({
             placeholder: '追加人格，比如：更贱一点，每条带一个 emoji',
             onChange: (v) => patch('personaPrompt', v),
           }),
-          h('div', { 'data-fa-note': '' }, '接在默认口吻后面。默认口吻：简洁、先给结论、不客套、不提插件名。'),
+          h('div', { 'data-fa-note': '' }, '接在默认口吻后面。默认是「小肥鱼」：简洁、先给结论、不客套。'),
           h('div', { 'data-fa-row': '' },
             h('span', { 'data-fa-label': '' }, '模型'),
             h('span', { 'data-fa-grow': '' },
@@ -263,7 +288,7 @@ window.__ModuleLoader__.load({
           h('div', { 'data-fa-row': '' },
             h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '数据目录'),
             h('span', { 'data-fa-grow': '' },
-              h(Text, { value: cfg.home, placeholder: '留空 = ~/.dsh/fish-atme', onChange: (v) => patch('home', v) })),
+              h(Text, { value: cfg.home, placeholder: '留空 = ~/.dsh/bili-duty', onChange: (v) => patch('home', v) })),
           ),
         ),
 

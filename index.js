@@ -25,7 +25,7 @@ export const name = 'fish-atme'
 export const inject = ['tools', 'llm', 'webServer']
 
 const AT_ME_CANDIDATES = [
-  // /x/msgfeed/atme 已下线（404 错误页），新接口是 /x/msgfeed/at；旧的留作退路
+  // 2026-11-01：/x/msgfeed/atme 已下线（404 错误页），新接口是这个；旧的留作退路
   'https://api.bilibili.com/x/msgfeed/at?platform=web&mobi_app=web&build=0',
   'https://api.bilibili.com/x/msgfeed/atme?build=0&mobi_app=web&platform=web',
 ]
@@ -52,10 +52,10 @@ export const DEFAULTS = {
 
 /** 回复口吻的底稿；personaPrompt 会接在它后面，用来覆盖/补充 */
 const BASE_PERSONA = [
-  '你负责替号主在 B 站评论区回复评论。',
-  '说话简洁、直接给结论，不说客套话；偶尔幽默一下，可以有自嘲。',
-  '不要用「主人」「本喵」「人家」这类称呼；不要提设置项、内部术语、插件名、判重、额度这些。',
-  '不要复述对方的原话，不要长篇大论。一句话到两句话，60 字以内。',
+  '你是主人养的一只小肥鱼，在他的 B 站评论区替他回话。',
+  '说话简洁、直接给结论，不说客套话；偶尔幽默一下，可以有鱼的自嘲。',
+  '不要用「主人」「本鱼」「人家」这类称呼；不要提设置项、内部术语、插件名、判重、额度这些。',
+  '不要复述他的原话，不要长篇大论。一句话到两句话，60 字以内。',
   '只输出回复正文，不要加引号、不要加 @ 前缀。',
 ].join('\n')
 
@@ -91,7 +91,7 @@ export const Config = !z ? undefined : z.object({
   personaPrompt: z.string().default('').extra('volatile', true),
   /** B 站凭证文件路径。留空 = <home>/bili_credential.json */
   credentialPath: z.string().default('').extra('volatile', true),
-  /** 数据目录（状态 / 日志 / 凭证都在这儿）。留空 = $DSH_HOME/fish-atme（默认 ~/.dsh/fish-atme） */
+  /** 数据目录（状态 / 日志 / 凭证都在这儿）。留空 = ~/.dsh/bili-duty */
   home: z.string().default('').extra('volatile', true),
 })
 
@@ -100,8 +100,7 @@ export const Config = !z ? undefined : z.object({
 function resolveHome(config) {
   const configured = String(config?.home ?? '').trim()
   if (configured) return configured
-  const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
-  return process.env.FISH_ATME_HOME || join(dshHome, 'fish-atme')
+  return process.env.BILI_DUTY_HOME || join(homedir(), '.dsh', 'bili-duty')
 }
 
 function credentialPathOf(config) {
@@ -235,7 +234,7 @@ function firstString(...values) {
 }
 
 function normalize(item) {
-  // /x/msgfeed/at 的字段：item.item.subject_id = 稿件 aid、source_id = 评论 rpid
+  // 2026-11-01 实测 /x/msgfeed/at：item.item.subject_id=稿件 aid、source_id=评论 rpid
   return {
     from: firstString(item?.user?.nickname, item?.user?.name) ?? '未知用户',
     mid: firstString(item?.user?.mid, item?.user?.uid),
@@ -821,6 +820,9 @@ export function apply(ctx, rawConfig = {}) {
 
   const handleApi = async (req, res, url) => {
     const path = url.pathname.replace(/^\/api\/fish-atme/, '') || '/'
+    // 每次进 API 都重读配置文件：否则手动改 JSON（或别处改了）之后设置页显示的还是
+    // 启动时那份内存快照 —— 2026-11-02 白名单就这么"看起来还在、其实没了"
+    reloadConfig()
 
     if (req.method === 'GET' && (path === '/' || path === '/state')) {
       return sendJson(res, 200, await snapshot())
