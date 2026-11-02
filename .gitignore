@@ -1,8 +1,17 @@
+# 依赖
 node_modules/
+
+# 运行时产物
+fish-atme-state.json
+fish-atme-config.json
 *.log
+
+# 凭证：明写一份 + 通配一份（别人可能改文件名）
+bili_credential.json
+*credential*.json
+
+# 本机杂项
 .DS_Store
 Thumbs.db
-# 本地数据（凭证 / 状态 / 配置）
-fish-atme-config.json
-fish-atme-state.json
-bili_credential.json
+.env
+.env.*
