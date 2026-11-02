@@ -348,18 +348,20 @@ node tests/offline.mjs      # 或 npm test
 
 ---
 
-## 发布到 GitHub / npm
+## 从 GitHub 装 / 发布
+
+仓库：<https://github.com/ZZh2333/dsh-fish-atme>
 
 ```bash
-cd dsh-fish-atme
-git init -b main
-git add -A
-git commit -m "fix(atme): 设置页保存不再覆盖白名单，空白名单给出警告（0.2.0）"
-git remote add origin git@github.com:<你的账号>/dsh-fish-atme.git
+# 装进 DSH
+dsh plugin add https://github.com/ZZh2333/dsh-fish-atme.git
+
+# 自己发版
+git remote add origin git@github.com:ZZh2333/dsh-fish-atme.git
 git push -u origin main
 ```
 
-- 已经在用 npm 的话：`npm publish`（`package.json` 里建议补上 `repository` / `homepage` / `bugs` 三个字段，指向你的仓库）。
+- 已经在用 npm 的话：`npm publish`（`package.json` 里的 `repository` / `homepage` / `bugs` 已指向这个仓库）。
 - 提交前跑一遍 `node tests/offline.mjs`，并确认没有把 `bili_credential.json`、`fish-atme-*.json` 提交上去（`.gitignore` 已经挡了）。
 
 ---
