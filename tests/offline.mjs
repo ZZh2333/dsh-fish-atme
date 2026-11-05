@@ -257,20 +257,26 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   eq('模式识别：老配置 subtitle = 只看开头', normalizeVideoMode('subtitle'), 'head')
   eq('模式识别：大小写/空值', [normalizeVideoMode('FULL'), normalizeVideoMode(undefined), normalizeVideoMode('off')], ['full', 'full', 'off'])
 
-  // 造一支「开头寒暄、中段有架构、结尾有实验数字」的长视频
-  const forVideo = (filler) => [
-    '大家好我是娜娜'.repeat(1),
-    filler.repeat(120),
-    '，团队把全局协调与具体执行拆成两层，上面叫 Router，下面叫 Worker。',
-    filler.repeat(160),
-    '，Super-agent 的任务完成时间中位数是 12.4 分钟，95 分位是 15.7 分钟；单会话的 95 分位达到 29.5 分钟。',
-    filler.repeat(160),
+  // 造一支「开头寒暄、中段有架构、结尾有实验数字」的长视频。
+  // 特意埋了诱饵：开头就出现「活跃会话」「实验」这些泛词 —— 实机上正是它们把真正的答案段挤掉了
+  const longVideo = [
+    '大家好我是娜娜，一个 AI 已经能帮你写代码查问题提交修改，但如果同时交给它几项工作，你可能还得开好几个对话框。',
+    '一个人通常只能同时跟进三到五个活跃会话，继续增加窗口意味着你要记住更多背景，实验里也反复提到会话这个词。',
+    '，团队把全局协调与具体执行拆成两层，上面叫 Router，下面叫 Worker，Router 不亲自执行具体工作。',
+    '这是一段和问题无关的铺垫内容，'.repeat(300),
+    '，团队做了初步的调度实验，Super-agent 的任务完成时间中位数是 12.4 分钟，95 分位是 15.7 分钟；单会话的 95 分位达到 29.5 分钟。',
+    '这是一段和问题无关的结尾铺垫，'.repeat(160),
     '如果你喜欢本期视频记得订阅点赞，我们下期再见。',
   ].join('')
-  const longVideo = forVideo('这是一段和问题无关的铺垫内容，')
 
   ok('长视频确实超预算', longVideo.length > 6000, `${longVideo.length} 字`)
   const ask = '那个调度实验里 super-agent 和单会话差多少？'
+  // 关键回归：预算只有 1200 时，也必须挑到「调度实验」那段，而不是开头那段「活跃会话」
+  const tight = buildVideoContext(longVideo, ask, 1200, 'full')
+  ok('预算 1200 也能挑中答案段（12.4 / 29.5）', tight.includes('12.4') && tight.includes('29.5'), tight.slice(0, 160))
+  ok('预算 1200 不超预算', tight.length <= 1200, `${tight.length} 字`)
+  ok('小写评论能命中大写的 Super-agent', pickRelevantWindows(longVideo, 'super-agent 那段', 800, 3).length > 0)
+
   const picked = buildVideoContext(longVideo, ask, 3000, 'full')
   ok('full 模式不超预算', picked.length <= 3000, `${picked.length} 字`)
   ok('把他问的那段找回来了（12.4 / 29.5 都在）', picked.includes('12.4') && picked.includes('29.5'), picked.slice(0, 120))

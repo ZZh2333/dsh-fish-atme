@@ -340,6 +340,9 @@ export function pickRelevantWindows(flat, comment, budget, max = 3) {
   const ask = String(comment ?? '')
   const room = Math.max(0, Number(budget) || 0)
   if (!text || !ask || room <= 0) return []
+  // 统一小写再找（字幕里写的是 "Super-agent"，评论里是 "super-agent"）；
+  // 小写化对中文/ASCII 不改长度，所以下标可以直接回原文切
+  const hay = text.toLowerCase()
 
   const grams = new Set()
   for (const piece of ask.toLowerCase().split(/[^\u4e00-\u9fa5a-z0-9]+/)) {
@@ -355,44 +358,53 @@ export function pickRelevantWindows(flat, comment, budget, max = 3) {
   }
   if (grams.size === 0) return []
 
-  const radius = Math.max(120, Math.floor(room / (max * 2)))
+  // 每个词的权重 = 词长 / log(出现次数)：越具体、越少见的词越说明「他问的就是这段」。
+  // 否则「会话」这种片子里到处都有的词会把「调度实验」淹掉 —— 2026-11-05 实机踩到过。
   const hits = []
+  const weightOf = new Map()
   for (const gram of grams) {
+    const positions = []
     let from = 0
-    for (let n = 0; n < 12; n += 1) {
-      const at = text.indexOf(gram, from)
+    for (let n = 0; n < 60; n += 1) {
+      const at = hay.indexOf(gram, from)
       if (at < 0) break
-      hits.push({ at, gram })
+      positions.push(at)
       from = at + gram.length
     }
+    if (positions.length === 0) continue
+    weightOf.set(gram, gram.length / (1 + Math.log2(positions.length)))
+    for (const at of positions.slice(0, 12)) hits.push({ at, gram })
   }
   if (hits.length === 0) return []
   hits.sort((a, b) => a.at - b.at)
 
-  // 相邻命中并成一段：那一片词越多样，越可能真是他问的事
-  const groups = []
+  // 以每个命中点为圆心开一个窗口，给窗口打分（窗口里出现过哪些词、这些词有多具体），
+  // 再取分数最高的几段、互不重叠。不用「先合并再切」——那样预算不够时容易从左边切，
+  // 把命中点本身切掉（2026-11-05 实机踩到：答案段盖住了，却被截在它前面）。
+  const radius = Math.max(150, Math.min(900, Math.floor(room / (max + 1))))
+  const cands = []
   for (const hit of hits) {
-    const last = groups[groups.length - 1]
-    if (last && hit.at - last.end <= radius) {
-      last.end = hit.at + hit.gram.length
-      last.grams.add(hit.gram)
-      last.hits += 1
-    } else {
-      groups.push({ start: hit.at, end: hit.at + hit.gram.length, grams: new Set([hit.gram]), hits: 1 })
+    const start = Math.max(0, hit.at - radius)
+    const end = Math.min(text.length, hit.at + radius)
+    const seen = new Set()
+    let score = 0
+    for (const other of hits) {
+      if (other.at < start || other.at >= end || seen.has(other.gram)) continue
+      seen.add(other.gram)
+      score += weightOf.get(other.gram) ?? 0
     }
+    cands.push({ start, end, score, center: hit.at, grams: seen.size })
   }
-  groups.sort((a, b) => b.grams.size - a.grams.size || b.hits - a.hits)
+  cands.sort((a, b) => b.score - a.score || b.grams - a.grams)
 
   const picked = []
-  for (const group of groups) {
+  for (const cand of cands) {
     if (picked.length >= max) break
-    const start = Math.max(0, group.start - radius)
-    const end = Math.min(text.length, group.end + radius)
-    if (picked.some((win) => start < win.end && end > win.start)) continue
-    picked.push({ start, end })
+    if (picked.some((win) => cand.start < win.end && cand.end > win.start)) continue
+    picked.push(cand)
   }
   picked.sort((a, b) => a.start - b.start)
-  return picked
+  return picked.map(({ start, end }) => ({ start, end }))
 }
 
 /** 没有命中时的兜底：开头 + 全片均匀抽样，保证中后段也在。 */
@@ -428,16 +440,20 @@ export function buildVideoContext(text, comment, maxChars = 8000, mode = 'full')
   const head = Math.min(800, Math.floor(budget * 0.2))
   const tail = Math.min(300, Math.floor(budget * 0.08))
   const room = Math.max(0, budget - head - tail - 4)
-  const windows = pickRelevantWindows(flat, comment, room, 3)
+  const windows = pickRelevantWindows(flat, comment, room, 3).filter((win) => win.start >= head)
   if (windows.length === 0) return evenSample(flat, budget)
 
   const parts = [flat.slice(0, head)]
+  const need = windows.reduce((sum, win) => sum + (win.end - win.start), 0) || 1
   let left = room
   for (const win of windows) {
-    if (left <= 60) break
-    const take = Math.min(left, win.end - win.start, Math.max(120, Math.floor(room / windows.length)))
-    parts.push(flat.slice(win.start, win.start + take))
-    left -= take
+    if (left <= 40) break
+    const len = win.end - win.start
+    const share = Math.max(80, Math.min(left, Math.round((room * len) / need)))
+    // 预算不够时从中间取：命中点通常在窗口正中，这样不会把答案截掉
+    const cut = Math.max(0, Math.floor((len - share) / 2))
+    parts.push(flat.slice(win.start + cut, win.start + cut + share))
+    left -= share
   }
   if (tail > 0) parts.push(flat.slice(flat.length - tail))
   const joined = parts.join('…')
