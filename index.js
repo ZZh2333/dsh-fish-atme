@@ -997,7 +997,7 @@ export function apply(ctx, rawConfig = {}) {
     )
     return compact({
       ok: true,
-      rpid: target.rpid,
+      rpid: String(target.rpid ?? ''),
       video: video.title ?? target.title,
       hisText: target.text,
       draft,
