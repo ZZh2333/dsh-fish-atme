@@ -259,6 +259,7 @@ POST <本机 origin>/api/memory-vector/search    { query, k, scope }
 | `memoryTopK` | int | `3` | 最多带几条记忆进 prompt |
 | `memoryMaxChars` | int | `600` | 记忆正文总字符预算，超了截断 |
 | `memoryMinScore` | number | `0.3` | 相似度下限，低于它不采用 |
+| `memoryAllowFtsOnly` | bool | `false` | 是否接受「纯关键词命中」（没有余弦相似度，多半是噪音）。默认不接受 |
 | `memoryScope` | string | `global` | 检索范围：`global` / `workspace-first` / `workspace` |
 | `memoryEndpoint` | string | `""` | 检索地址，留空 = `<本机 origin>/api/memory-vector/search` |
 | `credentialPath` | string | `""` | 凭证文件路径，留空 = `<home>/bili_credential.json` |

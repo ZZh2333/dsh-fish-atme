@@ -347,6 +347,12 @@ window.__ModuleLoader__.load({
             : null,
           cfg.memoryEnabled === true
             ? h('div', { 'data-fa-row': '' },
+              h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '也收「纯关键词命中」（没有相似度，多半是噪音）'),
+              h(Switch, { on: cfg.memoryAllowFtsOnly === true, onChange: (v) => patch('memoryAllowFtsOnly', v) }),
+            )
+            : null,
+          cfg.memoryEnabled === true
+            ? h('div', { 'data-fa-row': '' },
               h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '范围'),
               h(Choices, {
                 value: cfg.memoryScope,

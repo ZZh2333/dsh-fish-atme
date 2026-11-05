@@ -57,6 +57,8 @@ export const DEFAULTS = {
   memoryTopK: 3,
   memoryMaxChars: 600,
   memoryMinScore: 0.3,
+  /** 是否接受「纯关键词命中」（没有余弦相似度，通常是噪音） */
+  memoryAllowFtsOnly: false,
   memoryScope: 'global',
   /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
   memoryEndpoint: '',
@@ -167,12 +169,17 @@ export function formatMemories(hits, options = {}) {
   const maxChars = Math.max(0, Number(options.maxChars) || 0)
   const minScore = Number(options.minScore ?? 0)
   const topK = Math.max(1, Number(options.topK) || 3)
+  // 纯关键词命中没有余弦相似度（memory-vector 只在向量通路给 similarity）。
+  // 给人格注入用的记忆里，这类命中大多是「词碰上了」的噪音 —— 默认不要。
+  const allowFtsOnly = options.allowFtsOnly === true
   const lines = []
   let budget = maxChars
   for (const hit of Array.isArray(hits) ? hits : []) {
     if (lines.length >= topK || budget <= 0) break
     const similarity = hit?.similarity
-    if (typeof similarity === 'number' && Number.isFinite(minScore) && similarity < minScore) continue
+    const hasVector = typeof similarity === 'number' && Number.isFinite(similarity)
+    if (!hasVector && !allowFtsOnly) continue
+    if (hasVector && Number.isFinite(minScore) && similarity < minScore) continue
     let text = String(hit?.text ?? '').replace(/\s+/g, ' ').trim()
     if (text === '' || looksLikeCheckpoint(text)) continue
     // 旧块尾巴上常挂着「【记忆·自动回想】……」——那是当时注入给模型的旁注，不是记忆本身
@@ -217,6 +224,7 @@ async function fetchMemories(ctx, config, query, log) {
       maxChars: Number(config.memoryMaxChars) || 0,
       minScore: Number(config.memoryMinScore),
       topK: Number(config.memoryTopK) || 3,
+      allowFtsOnly: config.memoryAllowFtsOnly === true,
     })
     return { lines }
   } catch (error) {
@@ -273,6 +281,8 @@ export const Config = !z ? undefined : z.object({
   memoryMaxChars: z.natural().default(600).extra('volatile', true),
   /** 相似度下限；低于它的记忆不采用 */
   memoryMinScore: z.natural().default(0.3).extra('volatile', true),
+  /** 是否接受没有余弦相似度的「纯关键词命中」（默认不接受：多数是噪音） */
+  memoryAllowFtsOnly: z.boolean().default(false).extra('volatile', true),
   /** 检索范围：global / workspace / workspace-first */
   memoryScope: z.string().default('global').extra('volatile', true),
   /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
@@ -360,6 +370,7 @@ export function normalizeConfig(raw) {
   take('memoryTopK', isNum)
   take('memoryMaxChars', isNum)
   take('memoryMinScore', isNum)
+  take('memoryAllowFtsOnly', isBool)
   take('memoryScope', isStr)
   take('memoryEndpoint', isStr)
   take('credentialPath', isStr)
@@ -1063,6 +1074,7 @@ export function apply(ctx, rawConfig = {}) {
         memoryTopK: config.memoryTopK,
         memoryMaxChars: config.memoryMaxChars,
         memoryMinScore: config.memoryMinScore,
+        memoryAllowFtsOnly: config.memoryAllowFtsOnly === true,
         memoryScope: config.memoryScope ?? DEFAULTS.memoryScope,
         memoryEndpoint: config.memoryEndpoint ?? '',
         credentialPath: config.credentialPath ?? '',

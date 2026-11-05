@@ -229,6 +229,10 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   ok('压缩摘要不进 prompt', !lines.some((l) => l.includes('checkpoint')))
   ok('空白丢掉', lines.every((l) => l.trim().length > 0))
   ok('「你：」前缀剥掉', lines.includes('主人养了只鲸鱼'))
+  // 纯关键词命中没有 similarity：默认当噪音丢掉，显式允许才进来
+  const ftsOnly = [{ text: '只有关键词命中的旧事', ftsRank: 1 }]
+  eq('默认不接受纯关键词命中', formatMemories(ftsOnly, { maxChars: 600, minScore: 0.3, topK: 3 }), [])
+  eq('显式允许时才收', formatMemories(ftsOnly, { maxChars: 600, minScore: 0.3, topK: 3, allowFtsOnly: true }), ['只有关键词命中的旧事'])
   const withTail = formatMemories(
     [{ text: '正事要紧 【记忆·自动回想】以下是从过去对话里检索到的相关片段', similarity: 0.9 }],
     { maxChars: 600, minScore: 0, topK: 3 },
@@ -434,9 +438,9 @@ const timersCreated = (fn) => {
 // ── DEFAULTS 完整性 ─────────────────────────────────────────────────────
 eq('DEFAULTS 覆盖关键参数', Object.keys(DEFAULTS).sort(), [
   'agentMdPath', 'allowUids', 'credentialPath', 'dryRun', 'enabled', 'home', 'includeOthers',
-  'intervalMinutes', 'maxChars', 'maxPerDay', 'memoryEnabled', 'memoryEndpoint', 'memoryMaxChars',
-  'memoryMinScore', 'memoryScope', 'memoryTopK', 'minGapMinutes', 'model', 'personaMode',
-  'personaPrompt', 'personaSource', 'provider',
+  'intervalMinutes', 'maxChars', 'maxPerDay', 'memoryAllowFtsOnly', 'memoryEnabled', 'memoryEndpoint',
+  'memoryMaxChars', 'memoryMinScore', 'memoryScope', 'memoryTopK', 'minGapMinutes', 'model',
+  'personaMode', 'personaPrompt', 'personaSource', 'provider',
 ].sort())
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
