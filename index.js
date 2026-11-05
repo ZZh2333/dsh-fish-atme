@@ -64,6 +64,12 @@ export const DEFAULTS = {
   memoryScope: 'global',
   /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
   memoryEndpoint: '',
+  /** 回复前要不要先看懂视频：subtitle（问刷B站要字幕）| off */
+  videoContext: 'subtitle',
+  /** 字幕节选最多占多少字符 */
+  videoContextMaxChars: 800,
+  /** 等字幕最多等多久（毫秒），超时就只看标题 */
+  videoContextTimeoutMs: 20000,
   credentialPath: '',
   home: '',
 }
@@ -257,6 +263,104 @@ async function fetchMemories(ctx, config, query, log) {
   }
 }
 
+/* ─────────────── 视频内容：问「刷B站」要字幕 ─────────────── */
+
+// 取字幕失败也只吵一次（每小时）
+let videoWarnedAt = 0
+function warnVideo(log, message) {
+  const now = Date.now()
+  if (now - videoWarnedAt > 3_600_000) {
+    videoWarnedAt = now
+    log?.(message)
+  }
+}
+
+/**
+ * 从 bili_subtitle 的返回里刨出字幕正文。形状可能是：
+ *   { text } / JSON 字符串 / { content: [{type:'text'}] } / { raw: '...' }
+ * 认不出来就返回空串 —— 绝不抛。
+ */
+export function extractSubtitleText(value) {
+  if (value === null || value === undefined) return ''
+  if (typeof value === 'string') {
+    const raw = value.trim()
+    if (raw.startsWith('{') || raw.startsWith('[')) {
+      try { return extractSubtitleText(JSON.parse(raw)) } catch { return raw }
+    }
+    return raw
+  }
+  if (Array.isArray(value?.content)) {
+    const joined = value.content.filter((b) => b?.type === 'text').map((b) => b.text ?? '').join('\n')
+    if (joined.trim()) return joined.trim()
+  }
+  if (typeof value?.text === 'string') return value.text.trim()
+  if (typeof value?.raw === 'string') return extractSubtitleText(value.raw)
+  return ''
+}
+
+/** 字幕是 ASR 断句的碎行，进 prompt 之前把换行接成逗号，再按预算截断。 */
+export function formatVideoContext(text, maxChars = 800) {
+  const budget = Math.max(0, Number(maxChars) || 0)
+  if (budget === 0) return ''
+  const flat = String(text ?? '').replace(/\s*\n+\s*/g, '，').replace(/，{2,}/g, '，').replace(/^，|，$/g, '').trim()
+  if (flat.length <= budget) return flat
+  return `${flat.slice(0, Math.max(0, budget - 1))}…`
+}
+
+/** 「刷B站」（dsh-bili-scroll）注册的取字幕工具；没装 / 没启用就是 null。 */
+export function subtitleToolOf(ctx) {
+  try {
+    const tool = ctx?.tools?.get?.('bili_subtitle')
+    return tool && typeof tool === 'object' ? tool : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 回复前先看懂视频：调刷B站的 bili_subtitle 拿字幕，压成一段塞进 prompt。
+ * 任何失败都只是「这条只能看标题」，不影响回复本身。
+ * @returns {Promise<{ text: string, source: 'subtitle'|'off'|'none', chars: number, error?: string }>}
+ */
+export async function fetchVideoContext(ctx, config, bvid, log) {
+  const mode = String(config?.videoContext ?? 'subtitle')
+  if (mode === 'off') return { text: '', source: 'off', chars: 0 }
+  const id = String(bvid ?? '').trim()
+  if (!id) return { text: '', source: 'none', chars: 0, error: '没有 BV 号（可能是动态）' }
+
+  const tool = subtitleToolOf(ctx)
+  if (!tool) {
+    warnVideo(log, '没找到「刷B站」的 bili_subtitle 工具，这条只能看标题（装上 dsh-bili-scroll 并启用即可）')
+    return { text: '', source: 'none', chars: 0, error: '刷B站未安装或未启用' }
+  }
+  const run = typeof tool.execute === 'function' ? tool.execute.bind(tool)
+    : typeof tool.invoke === 'function' ? tool.invoke.bind(tool)
+      : null
+  if (!run) return { text: '', source: 'subtitle', chars: 0, error: 'bili_subtitle 没有可调用的执行入口' }
+
+  const timeoutMs = Math.max(1000, Number(config?.videoContextTimeoutMs) || 20_000)
+  let timer
+  try {
+    const raw = await Promise.race([
+      run({ bvid: id }, {}),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`取字幕超时（${timeoutMs}ms）`)), timeoutMs)
+      }),
+    ])
+    const text = formatVideoContext(extractSubtitleText(raw), config?.videoContextMaxChars ?? 800)
+    if (!text) {
+      warnVideo(log, `视频 ${id} 没有可用字幕，这条只能看标题`)
+      return { text: '', source: 'subtitle', chars: 0, error: '没有字幕' }
+    }
+    return { text, source: 'subtitle', chars: text.length }
+  } catch (error) {
+    warnVideo(log, `取字幕失败（已忽略，照常回）：${error?.message ?? error}`)
+    return { text: '', source: 'subtitle', chars: 0, error: String(error?.message ?? error) }
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 const z = await loadSchemastery()
 
 /**
@@ -309,6 +413,12 @@ export const Config = !z ? undefined : z.object({
   memoryScope: z.string().default('global').extra('volatile', true),
   /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
   memoryEndpoint: z.string().default('').extra('volatile', true),
+  /** 回复前要不要先看懂视频：subtitle（调刷B站的 bili_subtitle 拿字幕）| off */
+  videoContext: z.string().default('subtitle').extra('volatile', true),
+  /** 字幕节选最多占多少字符 */
+  videoContextMaxChars: z.natural().default(800).extra('volatile', true),
+  /** 等字幕最多等多久（毫秒），超时就只看标题 */
+  videoContextTimeoutMs: z.natural().default(20000).extra('volatile', true),
   /** B 站凭证文件路径。留空 = <home>/bili_credential.json */
   credentialPath: z.string().default('').extra('volatile', true),
   /** 数据目录（状态 / 日志 / 凭证都在这儿）。留空 = ~/.dsh/bili-duty */
@@ -396,6 +506,9 @@ export function normalizeConfig(raw) {
   take('memoryAllowFtsOnly', isBool)
   take('memoryScope', isStr)
   take('memoryEndpoint', isStr)
+  take('videoContext', isStr)
+  take('videoContextMaxChars', isNum)
+  take('videoContextTimeoutMs', isNum)
   take('credentialPath', isStr)
   take('home', isStr)
   return out
@@ -478,10 +591,11 @@ function normalize(item) {
   }
 }
 
-async function resolveVideo(aid, cookie, signal) {
-  if (!aid) return {}
+async function resolveVideo(aid, cookie, signal, bvid) {
+  const query = bvid ? `bvid=${encodeURIComponent(bvid)}` : aid ? `aid=${encodeURIComponent(aid)}` : ''
+  if (!query) return {}
   try {
-    const payload = await biliJson(`${VIEW_API}?aid=${encodeURIComponent(aid)}`, cookie, signal)
+    const payload = await biliJson(`${VIEW_API}?${query}`, cookie, signal)
     const data = payload?.data
     if (!data) return {}
     return { bvid: data.bvid, title: data.title, owner: data.owner?.name }
@@ -544,6 +658,16 @@ async function generateReply(llm, system, info, signal) {
   }
   lines.push(
     `视频：《${info.title ?? '未知标题'}》${info.owner ? `（UP：${info.owner}）` : ''}`,
+  )
+  const content = String(info?.videoContext ?? '').trim()
+  if (content) {
+    lines.push(
+      '【这个视频的实际内容（AI 字幕节选，可能有识别错误；用得上就接着聊，用不上别硬扯）】',
+      content,
+      '',
+    )
+  }
+  lines.push(
     `他在评论里写了：${info.text}`,
     '',
     '给这条 @ 写一句回复。',
@@ -664,10 +788,19 @@ function createWatcher(ctx, getConfig) {
       keepReplyRules: config.keepReplyRules !== false,
     })
     const memory = await fetchMemories(ctx, cfg, `${target.text ?? ''} ${video.title ?? ''}`, log)
+    const videoCtx = await fetchVideoContext(ctx, cfg, video.bvid, log)
+    if (videoCtx.chars > 0) log(`看懂了视频：字幕 ${videoCtx.chars} 字进 prompt`)
     const draft = await generateReply(
       ctx.llm,
       persona.system,
-      { ...target, ...video, provider: cfg.provider, model: cfg.model, memoryLines: memory.lines },
+      {
+        ...target,
+        ...video,
+        provider: cfg.provider,
+        model: cfg.model,
+        memoryLines: memory.lines,
+        videoContext: videoCtx.text,
+      },
       undefined,
     )
     const message = tidyReply(draft, maxChars)
@@ -834,14 +967,63 @@ export function apply(ctx, rawConfig = {}) {
     },
   })
 
+  /**
+   * 生成一条草稿（只生成不发送）。两条入口共用：按 rpid 找 @，或直接给 bvid 试语气。
+   * 顺序很重要：先看懂视频 → 再捞记忆 → 最后写。
+   */
+  const draftFor = async ({ target, bvid, cookie, signal }) => {
+    const video = bvid ? await resolveVideo(0, cookie, signal, bvid) : await resolveVideo(target.aid, cookie, signal)
+    const persona = buildSystemPrompt({
+      source: config.personaSource,
+      agentText: readAgentMd(resolveAgentMdPath(config)),
+      personaPrompt: config.personaPrompt,
+      personaMode: config.personaMode,
+      keepReplyRules: config.keepReplyRules !== false,
+    })
+    const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
+    const videoCtx = await fetchVideoContext(ctx, config, video.bvid ?? bvid, log)
+    const draft = await generateReply(
+      ctx.llm,
+      persona.system,
+      {
+        ...target,
+        ...video,
+        provider: config.provider,
+        model: config.model,
+        memoryLines: memory.lines,
+        videoContext: videoCtx.text,
+      },
+      signal,
+    )
+    return compact({
+      ok: true,
+      rpid: target.rpid,
+      video: video.title ?? target.title,
+      hisText: target.text,
+      draft,
+      tidied: tidyReply(draft, Math.max(20, Number(config.maxChars) || DEFAULTS.maxChars)),
+      willSend: config.dryRun !== true,
+      personaSource: persona.source,
+      personaChars: persona.baseChars,
+      memoryCount: memory.lines.length,
+      memories: memory.lines,
+      videoContextSource: videoCtx.source,
+      videoContextChars: videoCtx.chars,
+      videoContextError: videoCtx.error,
+    })
+  }
+
   /* 工具二：只生成不发（调语气用） */
   ctx.tools.register({
     name: 'bili_at_me_draft',
-    description: '给某条「@我的」生成一条回复草稿，只生成不发送。rpid 用 bili_at_me 返回的值；不填就挑最新一条。',
+    description: '给某条「@我的」生成一条回复草稿，只生成不发送。rpid 用 bili_at_me 返回的值；'
+      + '不填就挑最新一条。也可以直接传 bvid（＋text）拿任意视频试一条语气。',
     parameters: {
       type: 'object',
       properties: {
         rpid: { type: 'string', description: '要回复的那条评论的 rpid' },
+        bvid: { type: 'string', description: '可选：不按 @ 生成，直接指定视频 BV 号试一条' },
+        text: { type: 'string', description: '可选：配 bvid 用，假装这是他写的评论' },
       },
       additionalProperties: false,
     },
@@ -871,6 +1053,10 @@ export function apply(ctx, rawConfig = {}) {
             `人格：${value.personaSource === 'agent-md' ? 'AGENT.md' : '内置底稿'}`
               + `${value.personaChars ? `（${value.personaChars} 字）` : ''}`
               + ` · 记忆：${value.memoryCount > 0 ? `带上 ${value.memoryCount} 条` : '没带'}`,
+            `视频内容：${value.videoContextChars > 0
+              ? `字幕 ${value.videoContextChars} 字进了 prompt`
+              : value.videoContextError ? `没拿到（${value.videoContextError}）` : '没带'}
+              / ${value.videoContextSource === 'off' ? '开关关着' : '只看标题'}`,
             ...(Array.isArray(value.memories) && value.memories.length > 0
               ? ['带进 prompt 的记忆：', ...value.memories.map((line) => `  · ${line}`)]
               : []),
@@ -881,6 +1067,22 @@ export function apply(ctx, rawConfig = {}) {
     },
     async execute(args, exec) {
       const { cookie, meUid } = await cookieHeader(config)
+      // 传了 bvid 就不看「@我的」，直接拿这个视频 + 你给的评论试一条 —— 调语气用
+      const askedBvid = String(args?.bvid ?? '').trim()
+      if (askedBvid) {
+        return draftFor({
+          target: {
+            rpid: 0,
+            aid: 0,
+            mid: meUid,
+            at: new Date().toISOString(),
+            text: String(args?.text ?? '').trim() || '（没填评论内容，只试语气）',
+          },
+          bvid: askedBvid,
+          cookie,
+          signal: exec.signal,
+        })
+      }
       const items = await fetchAtItems(cookie, exec.signal).then((list) => list.map(normalize))
       const wanted = args?.rpid === undefined ? undefined : String(args.rpid)
       const fallback = meUid
@@ -888,33 +1090,7 @@ export function apply(ctx, rawConfig = {}) {
         : items[0]
       const target = wanted ? items.find((item) => item.rpid === wanted) : fallback ?? items[0]
       if (!target) throw new Error('没找到这条 @（rpid 对不上？先跑一次 bili_at_me 看看）')
-      const video = await resolveVideo(target.aid, cookie, exec.signal)
-      const persona = buildSystemPrompt({
-        source: config.personaSource,
-        agentText: readAgentMd(resolveAgentMdPath(config)),
-        personaPrompt: config.personaPrompt,
-        personaMode: config.personaMode,
-        keepReplyRules: config.keepReplyRules !== false,
-      })
-      const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
-      const draft = await generateReply(
-        ctx.llm,
-        persona.system,
-        { ...target, ...video, provider: config.provider, model: config.model, memoryLines: memory.lines },
-        exec.signal,
-      )
-      return compact({
-        ok: true,
-        rpid: target.rpid,
-        video: video.title ?? target.title,
-        hisText: target.text,
-        draft,
-        tidied: tidyReply(draft, Math.max(20, Number(config.maxChars) || DEFAULTS.maxChars)),
-        willSend: config.dryRun !== true,
-        personaSource: persona.source,
-        memoryCount: memory.lines.length,
-        memories: memory.lines,
-      })
+      return draftFor({ target, cookie, signal: exec.signal })
     },
   })
 
@@ -935,6 +1111,9 @@ export function apply(ctx, rawConfig = {}) {
             `去重表：${value.seenCount} 条`,
             `人格：${value.personaSource === 'agent-md' ? `AGENT.md（${value.personaChars} 字）` : '内置底稿'} · ${value.personaMode === 'replace' ? 'personaPrompt 替换底稿' : 'personaPrompt 追加'}`,
             `记忆：${value.memoryEnabled ? (value.memoryEndpoint ? `开（topK ${value.memoryTopK}）` : '开，但找不到检索地址') : '关'}`,
+            `看视频：${value.videoContext === 'off' ? '关（只凭标题回）'
+              : value.subtitleToolAvailable ? '开（调刷B站的 bili_subtitle 取字幕）'
+                : '想开，但没找到 bili_subtitle —— 先装/启用「刷B站」'}`,
             `最近一条：${value.lastText ?? '(无)'}`,
             `状态文件：${value.stateFile}`,
             `日志：${value.logFile}`,
@@ -974,6 +1153,9 @@ export function apply(ctx, rawConfig = {}) {
         memoryEnabled: config.memoryEnabled === true,
         memoryTopK: Number(config.memoryTopK) || DEFAULTS.memoryTopK,
         memoryEndpoint: memoryEndpointOf(ctx, config),
+        videoContext: String(config.videoContext ?? DEFAULTS.videoContext),
+        videoContextChars: Number(config.videoContextMaxChars) || DEFAULTS.videoContextMaxChars,
+        subtitleToolAvailable: subtitleToolOf(ctx) !== null,
         stateFile,
         logFile,
       })
@@ -1105,6 +1287,10 @@ export function apply(ctx, rawConfig = {}) {
         memoryAllowFtsOnly: config.memoryAllowFtsOnly === true,
         memoryScope: config.memoryScope ?? DEFAULTS.memoryScope,
         memoryEndpoint: config.memoryEndpoint ?? '',
+        videoContext: config.videoContext ?? DEFAULTS.videoContext,
+        videoContextMaxChars: config.videoContextMaxChars,
+        videoContextTimeoutMs: config.videoContextTimeoutMs,
+        subtitleToolAvailable: subtitleToolOf(ctx) !== null,
         credentialPath: config.credentialPath ?? '',
         home: config.home ?? '',
       },
@@ -1167,10 +1353,18 @@ export function apply(ctx, rawConfig = {}) {
         keepReplyRules: config.keepReplyRules !== false,
       })
       const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
+      const videoCtx = await fetchVideoContext(ctx, config, video.bvid, log)
       const draft = await generateReply(
         ctx.llm,
         persona.system,
-        { ...target, ...video, provider: config.provider, model: config.model, memoryLines: memory.lines },
+        {
+          ...target,
+          ...video,
+          provider: config.provider,
+          model: config.model,
+          memoryLines: memory.lines,
+          videoContext: videoCtx.text,
+        },
         undefined,
       )
       return sendJson(res, 200, {
@@ -1186,6 +1380,9 @@ export function apply(ctx, rawConfig = {}) {
         memoryCount: memory.lines.length,
         memories: memory.lines,
         memoryError: memory.error,
+        videoContextSource: videoCtx.source,
+        videoContextChars: videoCtx.chars,
+        videoContextError: videoCtx.error,
       })
     }
 
@@ -1219,4 +1416,5 @@ export const __test__ = {
   tidyReply, normalize, postReply, generateReply, resolveHome, allowSet, DEFAULTS,
   stripManagedBlock, buildSystemPrompt, readAgentMd, resolveAgentMdPath, dshHomeDir,
   formatMemories, memoryEndpointOf, fetchMemories, BASE_PERSONA, REPLY_RULES,
+  extractSubtitleText, formatVideoContext, subtitleToolOf, fetchVideoContext,
 }

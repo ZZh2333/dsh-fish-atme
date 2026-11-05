@@ -7,6 +7,7 @@ import { apply, Config, DEFAULTS, name as pluginName, normalizeConfig, __test__ 
 const {
   tidyReply, normalize, postReply, generateReply, resolveHome, allowSet,
   stripManagedBlock, buildSystemPrompt, readAgentMd, formatMemories, memoryEndpointOf, fetchMemories,
+  extractSubtitleText, formatVideoContext, fetchVideoContext,
 } = __test__
 
 let failed = 0
@@ -222,6 +223,66 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   ok('场景规则排在人格之后（后者权重更高）', fromAgent.system.indexOf('你是子非鱼') < fromAgent.system.indexOf('场景规则'))
   const noRules = buildSystemPrompt({ source: 'agent-md', agentText: md, keepReplyRules: false })
   ok('keepReplyRules=false 时才不加', !noRules.system.includes('60 字以内'))
+}
+
+// ── 视频内容：先看懂视频再回 ──────────────────────────────────────────────
+{
+  // 返回形状有好几种，都得能刨出正文
+  eq('认 { text }', extractSubtitleText({ text: '大家好' }), '大家好')
+  eq('认 JSON 字符串', extractSubtitleText('{"text":"字幕正文"}'), '字幕正文')
+  eq('认裸字符串', extractSubtitleText('就是字幕'), '就是字幕')
+  eq('认 content 块', extractSubtitleText({ content: [{ type: 'text', text: 'a' }, { type: 'image' }, { type: 'text', text: 'b' }] }), 'a\nb')
+  eq('认 raw 包一层', extractSubtitleText({ raw: '{"text":"嵌套"}' }), '嵌套')
+  eq('没字幕（只有 message）→ 空串', extractSubtitleText({ message: '该视频没有字幕' }), '')
+  eq('null 不炸', extractSubtitleText(null), '')
+
+  // ASR 碎行接成一句，再按预算截
+  eq('碎行接成逗号', formatVideoContext('第一句\n第二句\n\n第三句', 100), '第一句，第二句，第三句')
+  eq('不超预算就不截', formatVideoContext('短字幕', 100), '短字幕')
+  eq('超预算截断并加省略号', formatVideoContext('一'.repeat(50), 10), `${'一'.repeat(9)}…`)
+  eq('预算 0 = 不要内容', formatVideoContext('随便', 0), '')
+
+  // 取字幕：工具在 → 拿到正文
+  {
+    const ctx = { tools: { get: (n) => n === 'bili_subtitle' ? { execute: async () => ({ text: '这条视频在讲用 DSH 装插件' }) } : null } }
+    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle', videoContextMaxChars: 800 }, 'BV1xx411c7mD', () => {})
+    eq('拿到字幕', [got.source, got.chars > 0], ['subtitle', true])
+    ok('字幕正文进得去', got.text.includes('装插件'))
+  }
+  // 工具不在 → 只看标题，且不抛
+  {
+    const ctx = { tools: { get: () => null } }
+    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle' }, 'BV1xx411c7mD', () => {})
+    eq('没有刷B站 → 空内容', got.text, '')
+    ok('报出原因', String(got.error ?? '').includes('未安装') || String(got.error ?? '').includes('未启用'))
+  }
+  // 工具抛错 → 吞掉
+  {
+    const ctx = { tools: { get: () => ({ execute: async () => { throw new Error('MCP 挂了') } }) } }
+    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle' }, 'BV1xx411c7mD', () => {})
+    eq('工具抛错不影响回复', got.text, '')
+    ok('错误信息带出来', String(got.error ?? '').includes('MCP'))
+  }
+  // 超时 → 不卡住整轮
+  {
+    const ctx = { tools: { get: () => ({ execute: () => new Promise(() => {}) }) } }
+    const started = Date.now()
+    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle', videoContextTimeoutMs: 1200 }, 'BV1xx411c7mD', () => {})
+    ok('超时会放弃（不死等）', Date.now() - started < 4000, `用了 ${Date.now() - started}ms`)
+    eq('超时也算没内容', got.text, '')
+  }
+  // 关掉开关 → 连工具都不碰
+  {
+    let called = false
+    const ctx = { tools: { get: () => ({ execute: async () => { called = true; return { text: 'x' } } }) } }
+    const got = await fetchVideoContext(ctx, { videoContext: 'off' }, 'BV1xx411c7mD', () => {})
+    eq('off 时不取字幕', [called, got.source], [false, 'off'])
+  }
+  // 没有 BV 号（动态）→ 静默跳过
+  {
+    const got = await fetchVideoContext({ tools: { get: () => null } }, { videoContext: 'subtitle' }, '', () => {})
+    ok('没有 BV 号不报错', got.text === '' && String(got.error ?? '').includes('动态'))
+  }
 }
 
 // ── 记忆：formatMemories 裁剪规则 ─────────────────────────────────────────
@@ -449,7 +510,8 @@ eq('DEFAULTS 覆盖关键参数', Object.keys(DEFAULTS).sort(), [
   'agentMdPath', 'allowUids', 'credentialPath', 'dryRun', 'enabled', 'home', 'includeOthers',
   'intervalMinutes', 'keepReplyRules', 'maxChars', 'maxPerDay', 'memoryAllowFtsOnly', 'memoryEnabled', 'memoryEndpoint',
   'memoryMaxChars', 'memoryMinScore', 'memoryScope', 'memoryTopK', 'minGapMinutes', 'model',
-  'personaMode', 'personaPrompt', 'personaSource', 'provider',
+  'personaMode', 'personaPrompt', 'personaSource', 'provider', 'videoContext', 'videoContextMaxChars',
+  'videoContextTimeoutMs',
 ].sort())
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
