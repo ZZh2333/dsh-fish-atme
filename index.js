@@ -66,7 +66,9 @@ export const DEFAULTS = {
   memoryEndpoint: '',
   /** 要不要把刷B站给的字幕带进 prompt：full / off。取字幕、理解视频都是刷B站的活 */
   videoContext: 'full',
-  /** 字幕最多占多少字符（纯成本护栏，超了就如实告诉模型「后半段没看到」） */
+  /** 要刷B站给的理解要点最多多少字（brief 档） */
+  videoBriefChars: 400,
+  /** 字幕原文最多占多少字符（subtitle 档的成本护栏，超了如实告诉模型「后半段没看到」） */
   videoContextMaxChars: 12000,
   /** 等字幕最多等多久（毫秒），超时就只看标题 */
   videoContextTimeoutMs: 20000,
@@ -265,15 +267,17 @@ async function fetchMemories(ctx, config, query, log) {
 
 /* ─────────────── 视频内容：问「刷B站」要字幕 ─────────────── */
 
-// 取字幕失败也只吵一次（每小时）
-let videoWarnedAt = 0
-function warnVideo(log, message) {
+// 同类失败每小时只吵一次（按原因分别计，免得「要点失败」把「没字幕」的提示吞掉）
+const videoWarnedAt = new Map()
+function warnVideo(log, message, key = message) {
   const now = Date.now()
-  if (now - videoWarnedAt > 3_600_000) {
-    videoWarnedAt = now
+  if (now - (videoWarnedAt.get(key) ?? 0) > 3_600_000) {
+    videoWarnedAt.set(key, now)
     log?.(message)
   }
 }
+/** 只给测试用：清掉节流记录 */
+export function resetVideoWarn() { videoWarnedAt.clear() }
 
 /**
  * 从 bili_subtitle 的返回里刨出字幕正文。形状可能是：
@@ -323,52 +327,119 @@ export function clampSubtitle(text, maxChars = 12000) {
   return { text: `${flat.slice(0, Math.max(0, budget - 1))}…`, total: flat.length }
 }
 
-/** 开 / 关。老值一律当「开」——本插件不再区分取法（取法是理解，不归它）。 */
+/**
+ * 三档：
+ *   brief    —— 要「刷B站」的理解要点（bili_brief），本插件只负责摘要成一句话
+ *   subtitle —— 直接拿字幕原文，自己理解（老行为）
+ *   off      —— 不看
+ * 老值（full / head / subtitle 以外的历史值）一律映射成 brief。
+ */
 export function normalizeVideoMode(value) {
   const mode = String(value ?? '').trim().toLowerCase()
-  return mode === 'off' || mode === 'none' || mode === 'false' ? 'off' : 'full'
+  if (mode === 'off' || mode === 'none' || mode === 'false') return 'off'
+  if (mode === 'subtitle' || mode === 'head' || mode === 'prefix') return 'subtitle'
+  return 'brief'
 }
 
-/** 「刷B站」（dsh-bili-scroll）注册的取字幕工具；没装 / 没启用就是 null。 */
-export function subtitleToolOf(ctx) {
+/** 「刷B站」（dsh-bili-scroll）注册的工具；没装 / 没启用就是 null。 */
+export function toolOf(ctx, name) {
   try {
-    const tool = ctx?.tools?.get?.('bili_subtitle')
+    const tool = ctx?.tools?.get?.(name)
     return tool && typeof tool === 'object' ? tool : null
   } catch {
     return null
   }
 }
 
+/** 取字幕原文的工具（subtitle 档用） */
+export function subtitleToolOf(ctx) {
+  return toolOf(ctx, 'bili_subtitle')
+}
+
+/** 要「理解要点」的工具（brief 档用） */
+export function briefToolOf(ctx) {
+  return toolOf(ctx, 'bili_brief')
+}
+
+/** 把工具调起来（不同宿主可能叫 execute / invoke） */
+function callTool(tool, args) {
+  const run = typeof tool?.execute === 'function' ? tool.execute.bind(tool)
+    : typeof tool?.invoke === 'function' ? tool.invoke.bind(tool)
+      : null
+  return run ? run(args, {}) : null
+}
+
 /**
- * 取材料：把刷B站给的**字幕正文**原样搬回去，不做任何内容层面的裁剪。
+ * 取材料。两条路，都只问「刷B站」，本插件不自己解读视频：
+ *   brief    —— 调 bili_brief 要「理解要点」（默认）；要点里已经包含"讲了什么 + 和这个问题相关的部分"
+ *   subtitle —— 调 bili_subtitle 拿字幕原文，交给模型自己读
+ * brief 失败（老版本刷B站 / 没 llm / 视频没字幕）时如果还开着 subtitle，会自动退回第二条路。
  * 任何失败都只是「这条只能看标题」，不影响回复本身。
- * @returns {Promise<{ text: string, source: 'subtitle'|'off'|'none', chars: number, total?: number, mode?: string, error?: string }>}
+ * @returns {Promise<{ text: string, source: 'brief'|'subtitle'|'off'|'none', chars: number, total?: number, mode?: string, error?: string }>}
  */
-export async function fetchVideoContext(ctx, config, bvid, log) {
+export async function fetchVideoContext(ctx, config, bvid, log, question = '') {
   const mode = normalizeVideoMode(config?.videoContext)
   if (mode === 'off') return { text: '', source: 'off', chars: 0, mode }
   const id = String(bvid ?? '').trim()
   if (!id) return { text: '', source: 'none', chars: 0, mode, error: '没有 BV 号（可能是动态）' }
 
+  const timeoutMs = Math.max(1000, Number(config?.videoContextTimeoutMs) || 20_000)
+  const withTimeout = async (promise, label) => {
+    let timer
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${label}超时（${timeoutMs}ms）`)), timeoutMs)
+        }),
+      ])
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
+  }
+
+  // ① 先要「理解要点」
+  if (mode === 'brief') {
+    const briefTool = briefToolOf(ctx)
+    if (briefTool) {
+      try {
+        const raw = await withTimeout(
+          callTool(briefTool, {
+            bvid: id,
+            question: String(question ?? ''),
+            maxChars: Math.max(80, Number(config?.videoBriefChars) || DEFAULTS.videoBriefChars),
+            provider: config?.provider,
+            model: config?.model,
+          }),
+          '刷B站理解',
+        )
+        const brief = String(raw?.brief ?? '').trim()
+        if (raw?.ok !== false && brief) {
+          return {
+            text: brief,
+            source: 'brief',
+            chars: brief.length,
+            total: Number(raw?.subtitleChars) || undefined,
+            mode,
+          }
+        }
+        warnVideo(log, `刷B站没给出要点（${raw?.error ?? '空要点'}），退回字幕原文`, 'brief-empty')
+      } catch (error) {
+        warnVideo(log, `刷B站理解失败（${error?.message ?? error}），退回字幕原文`, 'brief-fail')
+      }
+    } else {
+      warnVideo(log, '没找到 bili_brief（刷B站版本旧？），退回字幕原文', 'no-brief-tool')
+    }
+  }
+
+  // ② 退回字幕原文
   const tool = subtitleToolOf(ctx)
   if (!tool) {
-    warnVideo(log, '没找到「刷B站」的 bili_subtitle 工具，这条只能看标题（装上 dsh-bili-scroll 并启用即可）')
+    warnVideo(log, '没找到「刷B站」的 bili_subtitle / bili_brief，这条只能看标题（装上 dsh-bili-scroll 并启用即可）')
     return { text: '', source: 'none', chars: 0, mode, error: '刷B站未安装或未启用' }
   }
-  const run = typeof tool.execute === 'function' ? tool.execute.bind(tool)
-    : typeof tool.invoke === 'function' ? tool.invoke.bind(tool)
-      : null
-  if (!run) return { text: '', source: 'subtitle', chars: 0, mode, error: 'bili_subtitle 没有可调用的执行入口' }
-
-  const timeoutMs = Math.max(1000, Number(config?.videoContextTimeoutMs) || 20_000)
-  let timer
   try {
-    const raw = await Promise.race([
-      run({ bvid: id }, {}),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`取字幕超时（${timeoutMs}ms）`)), timeoutMs)
-      }),
-    ])
+    const raw = await withTimeout(callTool(tool, { bvid: id }) ?? Promise.reject(new Error('bili_subtitle 没有可调用的执行入口')), '取字幕')
     const { text, total } = clampSubtitle(
       extractSubtitleText(raw),
       config?.videoContextMaxChars ?? DEFAULTS.videoContextMaxChars,
@@ -381,8 +452,6 @@ export async function fetchVideoContext(ctx, config, bvid, log) {
   } catch (error) {
     warnVideo(log, `取字幕失败（已忽略，照常回）：${error?.message ?? error}`)
     return { text: '', source: 'subtitle', chars: 0, mode, error: String(error?.message ?? error) }
-  } finally {
-    if (timer) clearTimeout(timer)
   }
 }
 
@@ -440,7 +509,9 @@ export const Config = !z ? undefined : z.object({
   memoryEndpoint: z.string().default('').extra('volatile', true),
   /** 要不要带字幕进 prompt：full / off。取字幕靠刷B站，本插件不解读内容 */
   videoContext: z.string().default('full').extra('volatile', true),
-  /** 字幕最多占多少字符（成本护栏） */
+  /** 理解要点最多多少字（brief 档，要刷B站按这个字数出要点） */
+  videoBriefChars: z.natural().default(400).extra('volatile', true),
+  /** 字幕原文最多占多少字符（subtitle 档的成本护栏） */
   videoContextMaxChars: z.natural().default(12000).extra('volatile', true),
   /** 等字幕最多等多久（毫秒），超时就只看标题 */
   videoContextTimeoutMs: z.natural().default(20000).extra('volatile', true),
@@ -532,6 +603,7 @@ export function normalizeConfig(raw) {
   take('memoryScope', isStr)
   take('memoryEndpoint', isStr)
   take('videoContext', (value) => (typeof value === 'string' ? normalizeVideoMode(value) : null))
+  take('videoBriefChars', isNum)
   take('videoContextMaxChars', isNum)
   take('videoContextTimeoutMs', isNum)
   take('credentialPath', isStr)
@@ -686,17 +758,27 @@ async function generateReply(llm, system, info, signal) {
   )
   const content = String(info?.videoContext ?? '').trim()
   if (content) {
-    // 字幕是刷B站给的**原文**，这里只如实说明「给了多少、有没有截」，不替模型做筛选
-    const total = Number(info?.videoContextTotal) || content.length
-    const cut = total > content.length
-    lines.push(
-      cut
-        ? `【这个视频的字幕（AI 转写，可能有错别字）。全长 ${total} 字，太长只放下了前 ${content.length} 字，`
-          + '后半段你没看到，别假装看过；用得上就接着聊，用不上别硬扯】'
-        : `【这个视频的字幕全文（${content.length} 字，AI 转写可能有错别字；用得上就接着聊，用不上别硬扯）】`,
-      content,
-      '',
-    )
+    if (info?.videoContextSource === 'brief') {
+      // 这是「刷B站」理解后的要点，不是字幕原文
+      lines.push(
+        '【「刷B站」看过这条视频后给的要点（不是字幕原文，细节被压掉过）。'
+          + '用得上就接着聊，用不上别硬扯；要点里没写的细节别编】',
+        content,
+        '',
+      )
+    } else {
+      // 退回了字幕原文：只如实说明「给了多少、有没有截」
+      const total = Number(info?.videoContextTotal) || content.length
+      const cut = total > content.length
+      lines.push(
+        cut
+          ? `【这个视频的字幕（AI 转写，可能有错别字）。全长 ${total} 字，太长只放下了前 ${content.length} 字，`
+            + '后半段你没看到，别假装看过；用得上就接着聊，用不上别硬扯】'
+          : `【这个视频的字幕全文（${content.length} 字，AI 转写可能有错别字；用得上就接着聊，用不上别硬扯）】`,
+        content,
+        '',
+      )
+    }
   }
   lines.push(
     `他在评论里写了：${info.text}`,
@@ -819,9 +901,11 @@ export function createWatcher(ctx, getConfig) {
       keepReplyRules: cfg.keepReplyRules !== false,
     })
     const memory = await fetchMemories(ctx, cfg, `${target.text ?? ''} ${video.title ?? ''}`, log)
-    const videoCtx = await fetchVideoContext(ctx, cfg, video.bvid, log)
+    const videoCtx = await fetchVideoContext(ctx, cfg, video.bvid, log, target.text)
     if (videoCtx.chars > 0) {
-      log(`看懂了视频：字幕 ${videoCtx.chars}/${videoCtx.total ?? videoCtx.chars} 字进 prompt（${videoCtx.mode}）`)
+      log(videoCtx.source === 'brief'
+        ? `刷B站给了理解要点：${videoCtx.chars} 字进 prompt（字幕原文 ${videoCtx.total ?? '?'} 字）`
+        : `退回了字幕原文：${videoCtx.chars}/${videoCtx.total ?? videoCtx.chars} 字进 prompt`)
     }
     const draft = await generateReply(
       ctx.llm,
@@ -834,6 +918,7 @@ export function createWatcher(ctx, getConfig) {
         memoryLines: memory.lines,
         videoContext: videoCtx.text,
         videoContextTotal: videoCtx.total,
+        videoContextSource: videoCtx.source,
       },
       undefined,
     )
@@ -1017,7 +1102,7 @@ export function apply(ctx, rawConfig = {}) {
       keepReplyRules: config.keepReplyRules !== false,
     })
     const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
-    const videoCtx = await fetchVideoContext(ctx, config, video.bvid ?? bvid, log)
+    const videoCtx = await fetchVideoContext(ctx, config, video.bvid ?? bvid, log, target.text)
     const draft = await generateReply(
       ctx.llm,
       persona.system,
@@ -1029,6 +1114,7 @@ export function apply(ctx, rawConfig = {}) {
         memoryLines: memory.lines,
         videoContext: videoCtx.text,
         videoContextTotal: videoCtx.total,
+        videoContextSource: videoCtx.source,
       },
       signal,
     )
@@ -1083,8 +1169,10 @@ export function apply(ctx, rawConfig = {}) {
       render(_args, value) {
         if (!value?.ok) return [{ type: 'text', text: '没生成出来。' }]
         const videoLine = value.videoContextChars > 0
-          ? `视频内容：字幕 ${value.videoContextChars} 字进了 prompt`
-            + `${value.videoContextTotal > value.videoContextChars ? `（全长 ${value.videoContextTotal} 字，太长只给了前段）` : '（全文）'}`
+          ? value.videoContextSource === 'brief'
+            ? `视频内容：刷B站给了 ${value.videoContextChars} 字理解要点`
+              + `${value.videoContextTotal ? `（字幕原文 ${value.videoContextTotal} 字）` : ''}进了 prompt`
+            : `视频内容：字幕原文 ${value.videoContextChars} 字进了 prompt`
           : value.videoContextSource === 'off' ? '视频内容：开关关着，只看标题'
             : value.videoContextError ? `视频内容：没拿到（${value.videoContextError}），只看标题`
               : '视频内容：没带，只看标题'
@@ -1154,10 +1242,11 @@ export function apply(ctx, rawConfig = {}) {
             `人格：${value.personaSource === 'agent-md' ? `AGENT.md（${value.personaChars} 字）` : '内置底稿'} · ${value.personaMode === 'replace' ? 'personaPrompt 替换底稿' : 'personaPrompt 追加'}`,
             `记忆：${value.memoryEnabled ? (value.memoryEndpoint ? `开（topK ${value.memoryTopK}）` : '开，但找不到检索地址') : '关'}`,
             `看视频：${value.videoContext === 'off' ? '关（只凭标题回）'
-              : value.subtitleToolAvailable
-                ? '开（字幕由刷B站的 bili_subtitle 提供，本插件只搬运＋摘要；'
-                  + `上限 ${value.videoContextChars} 字）`
-                : '想开，但没找到 bili_subtitle —— 先装/启用「刷B站」'}`,
+              : value.briefToolAvailable
+                ? `开（要「刷B站」的理解要点，≤${value.videoBriefChars} 字；要点不行就退回字幕原文 ≤${value.videoContextChars} 字）`
+                : value.subtitleToolAvailable
+                  ? `开（没有 bili_brief，直接读字幕原文 ≤${value.videoContextChars} 字）`
+                  : '想开，但没找到 bili_brief / bili_subtitle —— 先装/启用「刷B站」'}`,
             `最近一条：${value.lastText ?? '(无)'}`,
             `状态文件：${value.stateFile}`,
             `日志：${value.logFile}`,
@@ -1199,7 +1288,9 @@ export function apply(ctx, rawConfig = {}) {
         memoryEndpoint: memoryEndpointOf(ctx, config),
         videoContext: String(config.videoContext ?? DEFAULTS.videoContext),
         videoContextChars: Number(config.videoContextMaxChars) || DEFAULTS.videoContextMaxChars,
+        videoBriefChars: Number(config.videoBriefChars) || DEFAULTS.videoBriefChars,
         subtitleToolAvailable: subtitleToolOf(ctx) !== null,
+        briefToolAvailable: briefToolOf(ctx) !== null,
         stateFile,
         logFile,
       })
@@ -1335,6 +1426,7 @@ export function apply(ctx, rawConfig = {}) {
         videoContextMaxChars: config.videoContextMaxChars,
         videoContextTimeoutMs: config.videoContextTimeoutMs,
         subtitleToolAvailable: subtitleToolOf(ctx) !== null,
+        briefToolAvailable: briefToolOf(ctx) !== null,
         credentialPath: config.credentialPath ?? '',
         home: config.home ?? '',
       },
@@ -1397,7 +1489,7 @@ export function apply(ctx, rawConfig = {}) {
         keepReplyRules: config.keepReplyRules !== false,
       })
       const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
-      const videoCtx = await fetchVideoContext(ctx, config, video.bvid, log)
+      const videoCtx = await fetchVideoContext(ctx, config, video.bvid, log, target.text)
       const draft = await generateReply(
         ctx.llm,
         persona.system,
@@ -1409,6 +1501,7 @@ export function apply(ctx, rawConfig = {}) {
           memoryLines: memory.lines,
           videoContext: videoCtx.text,
           videoContextTotal: videoCtx.total,
+          videoContextSource: videoCtx.source,
         },
         undefined,
       )
@@ -1463,6 +1556,6 @@ export const __test__ = {
   tidyReply, normalize, postReply, generateReply, resolveHome, allowSet, DEFAULTS,
   stripManagedBlock, buildSystemPrompt, readAgentMd, resolveAgentMdPath, dshHomeDir,
   formatMemories, memoryEndpointOf, fetchMemories, BASE_PERSONA, REPLY_RULES,
-  extractSubtitleText, subtitleToolOf, fetchVideoContext,
+  extractSubtitleText, subtitleToolOf, briefToolOf, toolOf, fetchVideoContext, resetVideoWarn,
   normalizeVideoMode, clampSubtitle, flattenSubtitle,
 }

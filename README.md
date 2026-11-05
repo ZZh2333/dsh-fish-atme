@@ -259,37 +259,44 @@ POST <本机 origin>/api/memory-vector/search    { query, k, scope }
   开发对话塞进 prompt，语气反而更怪。库越充实，阈值越好用。
 - 地址默认从 `ctx.webServer.getOrigin()` 推，也可以用 `memoryEndpoint` 指到别处。
 
-### 看视频：材料由刷B站给，本插件只搬运
+### 看视频：理解归刷B站，本插件只负责摘要
 
-只拿「标题 + 你的评论」回话，等于闭着眼睛接梗 —— 遇到知识型视频容易答成「一句正确的废话」。
-所以回复前会**先问「刷B站」要字幕**：
+只拿「标题 + 你的评论」回话，等于闭着眼睛接梗。所以回复前会**先问「刷B站」要一份理解要点**：
 
 ```
-ctx.tools.get('bili_subtitle').execute({ bvid })   →  { text }
+ctx.tools.get('bili_brief').execute({ bvid, question, maxChars })   →  { brief }
 ```
 
-拿到字幕 → 把 ASR 碎行接成一段 → 塞进 user prompt → 模型读完自己判断哪里能接话 → 摘要成 ≤80 字 → 发出去。
+拿到要点（默认 400 字内，「讲了什么 + 和这条评论直接相关的具体内容」）→ 塞进 prompt →
+本插件的模型把它压成一句话（≤80 字）→ 发出去。
 
 **边界很清楚**：
 
 | 谁 | 干什么 |
 |---|---|
-| 刷B站（`dsh-bili-scroll`） | 登录、wbi 签名、调 `/x/player/*`、拿到字幕原文 |
-| 模型 | **读懂**字幕，决定接哪句话 |
-| 本插件 | 取参、超时、降级、长度护栏、摘要口径、发评论 |
+| 刷B站（`dsh-bili-scroll`） | 登录、wbi 签名、取字幕、**读字幕出要点** |
+| 本插件 | 取参、超时、降级、摘要成 ≤80 字、发评论 |
+| 模型（本插件这侧） | 只在「要点 → 你的一句话」这一步开口 |
 
-本插件里**没有**「挑段 / 关键词加权 / 摘要视频内容」这类逻辑 —— 那属于理解，属于刷B站和模型。
+本插件里**没有**「读字幕理解视频」的逻辑 —— 那是刷B站的活。它连字幕原文都不读，只读要点。
 
-- **依赖**：「刷B站」。没装/没启用 → 日志提一次，这条退回只看标题，不报错、不卡住。
-- **开关**（`videoContext`）：`full`（默认，带字幕）/ `off`（只凭标题回）。
-- **长度护栏**（`videoContextMaxChars`，默认 12000 字）：**纯成本控制，不是理解**。
-  字幕短于上限就一个字不少地给；超了才从**尾巴**截断，并在 prompt 里写明「全长 N 字，这里只放了前 M 字，
-  后半段你没看到，别假装看过」。
+- **依赖**：「刷B站」+ 它的 `bili_brief` 工具。这个工具不是原生的，需要打一次补丁：
+  见 [`patches/bili-scroll-bili-brief.md`](patches/bili-scroll-bili-brief.md)。
+- **三档**（`videoContext`）：
+  - `brief`（默认）：要刷B站的理解要点。
+  - `subtitle`：自己读字幕原文（更全、更贵；相当于「不信要点」时的兜底）。
+  - `off`：只看标题。
+- **自动降级**：刷B站是旧版本（没有 `bili_brief`）、或它那边没 llm、或视频没字幕 →
+  日志写一句「退回字幕原文」，然后按 `subtitle` 档走，不报错、不卡住。
+- **要点长度**（`videoBriefChars`，默认 400）：要刷B站按这个字数出要点。
 - **为什么不自己签**：实测直连 `/x/player/v2` 与 `/x/player/wbi/v2`（不带 wbi 签名）**都返回 `subs: 0`** ——
   code 是 0，字幕是空，静默骗人；同一支视频走刷B站的 `bili_subtitle` 能拿到 258 段。所以这里复用它的链路，
-  不重复实现签名。
-- **超时**：`videoContextTimeoutMs`（默认 20s），超时就放弃这条的字幕，回复照发。
+  `subtitle` 档的长度护栏是 `videoContextMaxChars`（默认 12000）。
+- **超时**：`videoContextTimeoutMs`（默认 20s），超时就放弃这条的视频内容，回复照发。
 - 没有 BV 号的场合（比如在动态里 @ 你）直接跳过。
+
+> ⚠️ 刷B站是**拷贝安装**，它自己更新会覆盖掉 `bili_brief`。覆盖后本插件会自动退回读字幕原文，
+> 功能不坏只是贵一点；想恢复就照补丁说明再贴一次。
 
 ---
 
@@ -321,8 +328,9 @@ ctx.tools.get('bili_subtitle').execute({ bvid })   →  { text }
 | `memoryAllowFtsOnly` | bool | `false` | 是否接受「纯关键词命中」（没有余弦相似度，多半是噪音）。默认不接受 |
 | `memoryScope` | string | `global` | 检索范围：`global` / `workspace-first` / `workspace` |
 | `memoryEndpoint` | string | `""` | 检索地址，留空 = `<本机 origin>/api/memory-vector/search` |
-| `videoContext` | `full` \| `off` | `full` | 回复前要不要把刷B站给的视频字幕带进 prompt。老值 `head`/`subtitle` 一律当 `full`（本插件不再区分取法） |
-| `videoContextMaxChars` | int | `12000` | 字幕最多占多少字符 —— 纯成本护栏，超了从尾巴截断并如实告知模型 |
+| `videoContext` | `brief` \| `subtitle` \| `off` | `brief` | 视频理解谁来做：`brief` 要刷B站的要点（推荐）、`subtitle` 自己读字幕原文、`off` 只看标题 |
+| `videoBriefChars` | int | `400` | 要刷B站给多少字的理解要点 |
+| `videoContextMaxChars` | int | `12000` | `subtitle` 档字幕原文最多占多少字符（超了从尾巴截断并告知模型） |
 | `videoContextTimeoutMs` | int | `20000` | 等字幕最多等多久，超时就放弃这条的字幕 |
 | `credentialPath` | string | `""` | 凭证文件路径，留空 = `<home>/bili_credential.json` |
 | `home` | string | `""` | 数据目录，留空 = `$DSH_HOME/fish-atme`（默认 `~/.dsh/fish-atme`） |

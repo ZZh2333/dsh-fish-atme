@@ -10,7 +10,7 @@ import {
 } from '../index.js'
 import {
   extractSubtitleText, fetchVideoContext,
-  normalizeVideoMode, clampSubtitle, flattenSubtitle,
+  normalizeVideoMode, clampSubtitle, flattenSubtitle, briefToolOf, subtitleToolOf, resetVideoWarn,
 } from '../index.js'
 
 /** 每个用例一个临时目录，跑完就删 */
@@ -248,7 +248,11 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   eq('null 不炸', extractSubtitleText(null), '')
 
   // ── 0.6.0：本插件只做「搬运 + 长度护栏」，不做理解 ──
-  eq('模式识别：只有开/关', [normalizeVideoMode('FULL'), normalizeVideoMode(undefined), normalizeVideoMode('off'), normalizeVideoMode('head')], ['full', 'full', 'off', 'full'])
+  eq('模式识别：默认 brief', normalizeVideoMode(undefined), 'brief')
+  eq('模式识别：老值 full 也当 brief', normalizeVideoMode('full'), 'brief')
+  eq('模式识别：显式 subtitle 走原文', normalizeVideoMode('subtitle'), 'subtitle')
+  eq('模式识别：head 老值降级成 subtitle', normalizeVideoMode('head'), 'subtitle')
+  eq('模式识别：off', normalizeVideoMode('OFF'), 'off')
 
   // 护栏：短的原样、长的按字符截断，并如实报出「本来多长」
   {
@@ -299,6 +303,63 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
     const got = await fetchVideoContext(ctx, { videoContext: 'full', videoContextMaxChars: 12000 }, 'BV1xx411c7mD', () => {})
     eq('预算够就全量搬运', got.text, flattenSubtitle(text))
     eq('总长一致', got.total, got.chars)
+  }
+
+  // ── 0.7.0：优先要「刷B站」的理解要点 ──
+  {
+    const brief = { ok: true, bvid: 'BV1xx411c7mD', title: 'T', brief: '视频讲调度实验：中位数 12.4 分钟。', chars: 20, subtitleChars: 5545 }
+    const calls = []
+    const tools = (n) => {
+      if (n === 'bili_brief') return { execute: async (args) => { calls.push(['brief', args]); return brief } }
+      if (n === 'bili_subtitle') return { execute: async () => { calls.push(['subtitle']); return { text: '字幕原文' } } }
+      return null
+    }
+    const got = await fetchVideoContext({ tools: { get: tools } }, { videoContext: 'brief', videoBriefChars: 400 }, 'BV1xx411c7mD', () => {}, '差多少？')
+    eq('优先走 bili_brief', got.source, 'brief')
+    ok('要点原文进 prompt', got.text.includes('12.4'))
+    eq('带上字幕原本多长', got.total, 5545)
+    eq('调 brief 时把问题传过去了', calls[0][1].question, '差多少？')
+    eq('没有多调一次字幕', calls.length, 1)
+  }
+  {
+    // 老版本刷B站没有 bili_brief（或没 llm）→ 自动退回字幕原文
+    const tools = (n) => {
+      if (n === 'bili_brief') return { execute: async () => ({ ok: false, error: '这个宿主没有 llm 服务' }) }
+      if (n === 'bili_subtitle') return { execute: async () => ({ text: '这里才是字幕原文' }) }
+      return null
+    }
+    const logs = []
+    resetVideoWarn()
+    const got = await fetchVideoContext({ tools: { get: tools } }, { videoContext: 'brief' }, 'BV1xx411c7mD', (l) => logs.push(l))
+    eq('brief 失败 → 退回字幕原文', got.source, 'subtitle')
+    ok('退回时字幕正文在', got.text.includes('这里才是字幕原文'))
+    ok('日志里说明了为什么退回', logs.some((l) => l.includes('退回字幕原文')), logs.join(' | '))
+  }
+  {
+    // 明确指定 subtitle 档 → 连 brief 都不碰
+    const calls = []
+    const tools = (n) => {
+      if (n === 'bili_brief') return { execute: async () => { calls.push('brief'); return { ok: true, brief: 'x' } } }
+      if (n === 'bili_subtitle') return { execute: async () => ({ text: '原文' }) }
+      return null
+    }
+    const got = await fetchVideoContext({ tools: { get: tools } }, { videoContext: 'subtitle' }, 'BV1xx411c7mD', () => {})
+    eq('subtitle 档不调 brief', calls.length, 0)
+    eq('subtitle 档拿原文', got.text, '原文')
+  }
+  {
+    // 关掉 → 两个工具都不碰
+    const tools = { get: () => ({ execute: async () => { throw new Error('不该被调用') } }) }
+    const got = await fetchVideoContext({ tools }, { videoContext: 'off' }, 'BV1xx411c7mD', () => {})
+    eq('关掉就不碰工具', [got.source, got.text], ['off', ''])
+  }
+  {
+    const got = await fetchVideoContext({ tools: { get: () => null } }, {}, '', () => {})
+    eq('没有 BV 号就直说', got.source, 'none')
+  }
+  {
+    eq('工具查找：有就有', briefToolOf({ tools: { get: (n) => n === 'bili_brief' ? { execute() {} } : null } }) !== null, true)
+    eq('工具查找：没有就是 null', [briefToolOf({}), subtitleToolOf({})], [null, null])
   }
   // 工具不在 → 只看标题，且不抛
   {
@@ -631,7 +692,7 @@ eq('DEFAULTS 覆盖关键参数', Object.keys(DEFAULTS).sort(), [
   'agentMdPath', 'allowUids', 'credentialPath', 'dryRun', 'enabled', 'home', 'includeOthers',
   'intervalMinutes', 'keepReplyRules', 'maxChars', 'maxPerDay', 'memoryAllowFtsOnly', 'memoryEnabled', 'memoryEndpoint',
   'memoryMaxChars', 'memoryMinScore', 'memoryScope', 'memoryTopK', 'minGapMinutes', 'model',
-  'personaMode', 'personaPrompt', 'personaSource', 'provider', 'videoContext', 'videoContextMaxChars',
+  'personaMode', 'personaPrompt', 'personaSource', 'provider', 'videoBriefChars', 'videoContext', 'videoContextMaxChars',
   'videoContextTimeoutMs',
 ].sort())
 

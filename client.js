@@ -336,31 +336,48 @@ window.__ModuleLoader__.load({
         // ── 看视频 ──
         h('div', { 'data-fa-sec': '' },
           h('div', { 'data-fa-h': '' }, '看视频'),
-          h('div', { 'data-fa-note': '' }, '视频理解由「刷B站」负责（bili_subtitle）；本插件只管把字幕搬进 prompt，不挑段、不解读。'),
+          h('div', { 'data-fa-note': '' }, '视频理解由「刷B站」负责：它读字幕、出要点，本插件只把要点写进 prompt 并摘要成一句话。'),
           h('div', { 'data-fa-row': '' },
-            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '回复前带上视频字幕'),
+            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '回复前先让刷B站看懂视频'),
             h(Switch, {
               on: cfg.videoContext !== 'off',
-              onChange: (v) => patch('videoContext', v ? 'full' : 'off'),
+              onChange: (v) => patch('videoContext', v ? 'brief' : 'off'),
             }),
           ),
-          h('div', { 'data-fa-note': '' }, cfg.subtitleToolAvailable
-            ? '现在能拿到 bili_subtitle：回复前会把字幕全文带进去，接话才接得上内容。'
-            : '⚠️ 没找到 bili_subtitle 工具 —— 先装/启用「刷B站」(dsh-bili-scroll)，否则只能凭标题回。'),
+          h('div', { 'data-fa-note': '' }, cfg.briefToolAvailable
+            ? '现在能拿到 bili_brief：回复前会先要一份「理解和这条评论相关的要点」。'
+            : cfg.subtitleToolAvailable
+              ? '⚠️ 刷B站是旧版本（没有 bili_brief）—— 会退回「直接读字幕原文」。'
+              : '⚠️ 没找到 bili_brief / bili_subtitle —— 先装/启用「刷B站」(dsh-bili-scroll)，否则只能凭标题回。'),
           cfg.videoContext !== 'off'
             ? h('div', { 'data-fa-row': '' },
-              h('span', { 'data-fa-label': '' }, '字幕最多占'),
-              h(Num, { value: cfg.videoContextMaxChars, min: 0, max: 30000, onChange: (v) => patch('videoContextMaxChars', v) }),
+              h('span', { 'data-fa-label': '' }, '怎么理解'),
+              h(Choices, {
+                value: cfg.videoContext === 'subtitle' ? 'subtitle' : 'brief',
+                options: [
+                  ['brief', '要刷B站的要点（推荐）'],
+                  ['subtitle', '自己读字幕原文'],
+                ],
+                onChange: (v) => patch('videoContext', v),
+              }),
+            )
+            : null,
+          cfg.videoContext !== 'off'
+            ? h('div', { 'data-fa-row': '' },
+              h('span', { 'data-fa-label': '' }, '要点最多'),
+              h(Num, { value: cfg.videoBriefChars, min: 80, max: 2000, onChange: (v) => patch('videoBriefChars', v) }),
               h('span', { 'data-fa-label': '' }, '字 · 最多等'),
               h(Num, { value: cfg.videoContextTimeoutMs, min: 1000, max: 60000, onChange: (v) => patch('videoContextTimeoutMs', v) }),
               h('span', { 'data-fa-label': '' }, 'ms'),
             )
             : null,
           cfg.videoContext !== 'off'
-            ? h('div', { 'data-fa-note': '' }, '这是纯成本护栏：字幕短于上限就一个字不少地给，超了才从尾巴截断，并告诉模型「后半段没看到」。')
+            ? h('div', { 'data-fa-note': '' }, cfg.videoContext === 'subtitle'
+              ? '自己读字幕：更全但更贵，长字幕会直塞 prompt。'
+              : '要点：刷B站读完字幕给一份 400 字内的重点，省钱也更快；要点里没有的细节它不会编。')
             : null,
           cfg.videoContext !== 'off'
-            ? h('div', { 'data-fa-note': '' }, '字幕是 ASR 转的，会有错别字；没字幕的视频就只看标题，不会卡住。')
+            ? h('div', { 'data-fa-note': '' }, '刷B站出不了要点（没字幕 / 旧版本）时会自动退回读字幕原文，不会卡住。')
             : null,
         ),
 
