@@ -829,6 +829,12 @@ export function apply(ctx, rawConfig = {}) {
             `他写的：${value.hisText ?? ''}`,
             '',
             `草稿（截到 ${DEFAULTS.maxChars} 字口径）：${value.tidied ?? value.draft ?? ''}`,
+            `人格：${value.personaSource === 'agent-md' ? 'AGENT.md' : '内置底稿'}`
+              + `${value.personaChars ? `（${value.personaChars} 字）` : ''}`
+              + ` · 记忆：${value.memoryCount > 0 ? `带上 ${value.memoryCount} 条` : '没带'}`,
+            ...(Array.isArray(value.memories) && value.memories.length > 0
+              ? ['带进 prompt 的记忆：', ...value.memories.map((line) => `  · ${line}`)]
+              : []),
             `定时器现在：${value.willSend ? '会真的发' : 'dryRun，只写草稿'}`,
           ].join('\n'),
         }]
