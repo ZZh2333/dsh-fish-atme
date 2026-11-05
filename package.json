@@ -1,6 +1,6 @@
 {
   "name": "dsh-fish-atme",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "DSH 插件：盯着 B 站「@我的」，只回你本人 —— 定时轮询 + 人格化回复 + 三道安全闸",
   "keywords": [
     "dsh",

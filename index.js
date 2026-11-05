@@ -531,7 +531,11 @@ async function generateReply(llm, system, info, signal) {
       failure = chunk.reason.failure?.message ?? chunk.reason.kind
     }
   }
-  if (text.trim().length === 0 && failure) throw new Error(`模型调用失败：${failure}`)
+  if (text.trim().length === 0) {
+    // 空回复见过两次：模型这一跳什么都没吐（只有 reasoning 或直接被截断）。
+    // 必须抛 —— 否则草稿是空字符串、定时器把「空评论」当成功发出去。
+    throw new Error(failure ? `模型调用失败：${failure}` : '模型这一跳没返回任何正文（再试一次）')
+  }
   return text.trim()
 }
 

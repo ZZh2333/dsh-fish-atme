@@ -152,13 +152,31 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   const fakeLlm = {
     stream: (options) => {
       seen = options
-      return (async function* () { yield { type: 'finish', reason: { kind: 'stop' } } })()
+      return (async function* () {
+        yield { type: 'text-delta', index: 0, text: '好' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })()
     },
   }
   await generateReply(fakeLlm, '', { title: 'T', text: 'hi', provider: 'p', model: 'm' }, undefined)
   const promptText = (seen?.messages?.[0]?.content ?? []).map((b) => b.text ?? '').join('')
   ok('没有记忆时不留空块', !promptText.includes('你记得的相关旧事'))
   ok('system 空时回落内置底稿', String(seen?.system ?? '').includes('小肥鱼'))
+}
+
+// ── generateReply：模型吐出空正文必须抛，不能当成功 ──────────────────────
+{
+  const silentLlm = {
+    stream: () => (async function* () { yield { type: 'finish', reason: { kind: 'stop' } } })(),
+  }
+  let threw = null
+  try {
+    await generateReply(silentLlm, 'S', { title: 'T', text: 'hi', provider: 'p', model: 'm' }, undefined)
+  } catch (error) {
+    threw = error
+  }
+  ok('空正文抛错（否则会发空评论 / 给空草稿）', threw !== null, String(threw))
+  ok('错误信息说清楚是空正文', String(threw?.message ?? '').includes('没返回任何正文'))
 }
 
 // ── 人格：stripManagedBlock / buildSystemPrompt ───────────────────────────

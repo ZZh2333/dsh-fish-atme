@@ -229,6 +229,8 @@ POST <本机 origin>/api/memory-vector/search    { query, k, scope }
 - 插件没装 / 接口 404 / 连接被拒 —— **一律当没有记忆**，回复照发；日志最多每小时记一行，不刷屏。
 - 压缩摘要块（`<compacted-summary>`）、「【记忆·自动回想】」旁注、`你：`/`我：` 前缀都会被丢掉，不进 prompt。
 - 检索**要花向量化 token**（查一次 embed 一次），所以默认关；条数别贪，3 条够用。
+- **`memoryMinScore` 建议 0.4–0.5**：记忆库内容少（只有几场旧会话）时，0.3 会把一堆不相关的
+  开发对话塞进 prompt，语气反而更怪。库越充实，阈值越好用。
 - 地址默认从 `ctx.webServer.getOrigin()` 推，也可以用 `memoryEndpoint` 指到别处。
 
 ---
