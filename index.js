@@ -705,9 +705,13 @@ export function apply(ctx, rawConfig = {}) {
   const log = (line) => appendLog(logFile, line)
 
   // 设置页存的覆盖 > patch 里的初始值 > DEFAULTS。用同一个可变对象，改完就地生效
+  // ⚠️ 一定先剥 BOM：Windows 记事本 / PowerShell 5.1 的 Set-Content 会写 UTF-8 BOM，
+  //    带 BOM 的 JSON.parse 直接抛 SyntaxError，于是整份配置被静默丢掉、回落默认值
+  //    （2026-11-05 实测：设置页看着是保存了，定时器却按默认的 3 条跑）。
   const readOverrides = () => {
     try {
-      const saved = JSON.parse(readFileSync(configFile, 'utf8'))
+      const raw = readFileSync(configFile, 'utf8').replace(/^\uFEFF/, '')
+      const saved = JSON.parse(raw)
       return saved && typeof saved === 'object' ? saved : {}
     } catch {
       return {}

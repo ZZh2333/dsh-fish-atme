@@ -5,6 +5,18 @@
 
 ---
 
+## [0.3.1] - 2026-11-05
+
+### 修复
+
+- **带 UTF-8 BOM 的配置文件读不了，整份设置被静默丢掉**
+  Windows 记事本、PowerShell 5.1 的 `Set-Content -Encoding utf8` 都会写出 BOM，
+  `JSON.parse` 见到 `\uFEFF` 直接抛 `SyntaxError`，`readOverrides()` 又把这个异常吞了 ——
+  表现是「设置页/文件里明明写着 `maxPerDay: 20`，定时器按默认 3 条跑」。
+  现在读之前先剥 BOM，并加了回归测试。
+
+---
+
 ## [0.3.0] - 2026-11-05
 
 这一版解决「回得像插件，不像我」：**人格可以取 AGENT.md，记忆可以接 dsh-memory-vector。**

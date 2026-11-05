@@ -388,6 +388,12 @@ const timersCreated = (fn) => {
   const again = await call('GET', '/api/fish-atme/state')
   eq('再读一次，改动还在', again.json?.config?.intervalMinutes, 7)
 
+  // BOM：Windows 记事本 / PowerShell 5.1 写出来的配置文件带 UTF-8 BOM，
+  // JSON.parse 会直接抛，整份设置被静默丢掉 —— 2026-11-05 真踩到了
+  fsSync.writeFileSync(path.join(home, 'fish-atme-config.json'), '\uFEFF' + JSON.stringify({ maxPerDay: 9 }), 'utf8')
+  const afterBom = await call('GET', '/api/fish-atme/state')
+  eq('带 BOM 的配置也能读', afterBom.json?.config?.maxPerDay, 9)
+
   const bad = await call('GET', '/api/fish-atme/nope')
   eq('未知路径 404', bad.code, 404)
 
