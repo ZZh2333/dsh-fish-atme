@@ -73,6 +73,7 @@
       ].join('\n')
 
       let text = ''
+      let failure = ''
       try {
         for await (const chunk of llm.stream({
           provider: String(args.provider ?? '').trim() || undefined,
@@ -83,12 +84,15 @@
           maxTokens: Math.min(2000, Math.ceil(maxChars * 2)),
         })) {
           if (chunk?.type === 'text-delta') text += chunk.text
+          if (chunk?.type === 'finish' && (chunk.reason?.kind === 'error' || chunk.reason?.kind === 'aborted')) {
+            failure = chunk.reason.failure?.message ?? chunk.reason.kind
+          }
         }
       } catch (error) {
         return { ok: false, bvid, title, error: `理解失败：${error?.message ?? error}` }
       }
       const brief = text.trim().replace(/\s*\n+\s*/g, ' ').slice(0, maxChars)
-      if (!brief) return { ok: false, bvid, title, error: '模型没给出要点' }
+      if (!brief) return { ok: false, bvid, title, error: failure ? `模型调用失败：${failure}` : '模型这一跳没返回正文（可能只给了 reasoning）' }
       return { ok: true, bvid, title, brief, chars: brief.length, subtitleChars: subtitle.length }
     },
   })
