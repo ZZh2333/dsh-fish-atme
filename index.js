@@ -1043,6 +1043,11 @@ export function apply(ctx, rawConfig = {}) {
       },
       render(_args, value) {
         if (!value?.ok) return [{ type: 'text', text: '没生成出来。' }]
+        const videoLine = value.videoContextChars > 0
+          ? `视频内容：字幕 ${value.videoContextChars} 字进了 prompt`
+          : value.videoContextSource === 'off' ? '视频内容：开关关着，只看标题'
+            : value.videoContextError ? `视频内容：没拿到（${value.videoContextError}），只看标题`
+              : '视频内容：没带，只看标题'
         return [{
           type: 'text',
           text: [
@@ -1053,10 +1058,7 @@ export function apply(ctx, rawConfig = {}) {
             `人格：${value.personaSource === 'agent-md' ? 'AGENT.md' : '内置底稿'}`
               + `${value.personaChars ? `（${value.personaChars} 字）` : ''}`
               + ` · 记忆：${value.memoryCount > 0 ? `带上 ${value.memoryCount} 条` : '没带'}`,
-            `视频内容：${value.videoContextChars > 0
-              ? `字幕 ${value.videoContextChars} 字进了 prompt`
-              : value.videoContextError ? `没拿到（${value.videoContextError}）` : '没带'}
-              / ${value.videoContextSource === 'off' ? '开关关着' : '只看标题'}`,
+            videoLine,
             ...(Array.isArray(value.memories) && value.memories.length > 0
               ? ['带进 prompt 的记忆：', ...value.memories.map((line) => `  · ${line}`)]
               : []),
