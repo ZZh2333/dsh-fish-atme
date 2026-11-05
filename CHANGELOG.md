@@ -5,6 +5,25 @@
 
 ---
 
+## [未发布]
+
+### 新增
+
+- **`scripts/sanitize-check.mjs`：推送前脱敏体检**
+  扫一遍要提交的文件，拦 cookie / csrf / UID / 本机绝对路径 / 邮箱 / 明文密钥 /
+  运行时产物。只读，不联网，不改文件。命中任意一条退出码 1。
+  用法：`node scripts/sanitize-check.mjs`（默认查暂存区）、`--all`（查全部受控文件）。
+
+- **`.githooks/pre-commit`：提交时自动体检**
+  启用：`git config core.hooksPath .githooks`。规则改了只动 `scripts/sanitize-check.mjs` 一处。
+
+### 变更
+
+- `package.json` 补 `scripts`：`npm test`（跑 `tests/offline.mjs`）、`npm run sanitize`。
+  之前 README 写了「或 npm test」，但 package.json 里没有这个脚本，跑起来是空的。
+
+---
+
 ## [0.2.0] - 2026-11-02
 
 这一版全是「设置页」的坑。触发场景很日常：**白名单明明填了，定时器却一条都不回。**

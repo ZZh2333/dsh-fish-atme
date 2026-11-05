@@ -1,0 +1,19 @@
+#!/bin/sh
+# ============================================================================
+# pre-commit —— 提交前跑一遍脱敏体检（scripts/sanitize-check.mjs）
+# 启用方式（仓库里已配好，换台机器要重跑一次）：
+#   git config core.hooksPath .githooks
+# 临时跳过（不推荐）：git commit --no-verify
+# ============================================================================
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-commit: 找不到 node，跳过脱敏体检（请装 Node.js >= 20）" >&2
+  exit 0
+fi
+
+echo "pre-commit: 脱敏体检中…"
+node scripts/sanitize-check.mjs
