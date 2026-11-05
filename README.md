@@ -215,6 +215,24 @@ dsh plugin --profile <profile> add dsh-fish-atme
 - `personaMode`：`append` = 底稿 + `personaPrompt`；`replace` = `personaPrompt` **整份替换**底稿（`replace` 且 `personaPrompt` 为空 → 回落底稿，不会变成空 prompt）。
 - 读 AGENT.md 是**只读**，插件不会写它、也不会改你的人格设定。
 
+### 场景规则：跟人格解耦，永远压在最后
+
+persona 只管「像谁在说」，**怎么说**是另一件事。所以 system 的最后永远贴着这几条
+（`keepReplyRules: false` 才关）：
+
+```
+[这条回复的场景规则，优先于上面的一切风格描述]
+- 在 B 站评论区回一条，一句话到两句话，60 字以内。
+- 只输出回复正文：不要小标题、不要列表、不要加粗、不要引号、不要 @ 前缀。
+- 不要提到设置项、插件、模型、记忆、判重、额度这些内部东西。
+- 不要自称「主人」「本鱼」「人家」，也不要用「您」。
+```
+
+> **为什么单列一段**：`AGENT.md` 里除了人格还有一大堆「行事偏好」（插件安全审查、生图规则、
+> 先给结论再给理由……）。这些在 B 站评论区是噪音，会把一句「同感哈哈」写成带小标题的分析报告。
+> 2026-11-05 就踩过：`personaSource: agent-md` 把底稿整份换掉、场景规则跟着一起丢了，
+> 于是评论变成了长篇报告。现在两者分开：人格归人格，场景规则永远在。
+
 ### 记忆：接 dsh-memory-vector
 
 `memoryEnabled: true` 之后，每轮回复前拿「他的评论 + 视频标题」当查询词，打本机的：
@@ -254,6 +272,7 @@ POST <本机 origin>/api/memory-vector/search    { query, k, scope }
 | `personaSource` | `agent-md` \| `builtin` | `agent-md` | 底稿人格从哪来：读 `<DSH_HOME>/AGENT.md`，还是用内置「小肥鱼」底稿。**读不到文件自动回落内置**，不会因为没写 AGENT.md 就不回复 |
 | `personaMode` | `append` \| `replace` | `append` | `personaPrompt` 怎么用：接在底稿后面，还是**整份替换**底稿（`replace` + 空串会回落底稿，不会变成空 prompt） |
 | `personaPrompt` | string | `""` | 人格补充/替换（例：`更贱一点，每条带一个 emoji`） |
+| `keepReplyRules` | bool | `true` | 始终保留评论区场景规则（60 字以内、只输出正文、不提内部术语）。关掉后人格说什么就是什么，用 AGENT.md 时容易回成长篇报告 |
 | `agentMdPath` | string | `""` | AGENT.md 路径，留空 = `<DSH_HOME>/AGENT.md`（桌面版 `~/.dsh/AGENT.md`） |
 | `memoryEnabled` | bool | `false` | 回复前是否去 `dsh-memory-vector` 捞相关旧事。**默认关**：检索要花向量化 token |
 | `memoryTopK` | int | `3` | 最多带几条记忆进 prompt |

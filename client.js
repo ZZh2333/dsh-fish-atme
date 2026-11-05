@@ -320,6 +320,11 @@ window.__ModuleLoader__.load({
             ? 'replace：这段直接替换底稿（AGENT.md / 内置都不再用）。留空则回落底稿，不会变成空 prompt。'
             : 'append：底稿 + 这段，两条都在。'),
           h('div', { 'data-fa-row': '' },
+            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '始终保留评论区场景规则（60 字以内、只输出正文…）'),
+            h(Switch, { on: cfg.keepReplyRules !== false, onChange: (v) => patch('keepReplyRules', v) }),
+          ),
+          h('div', { 'data-fa-note': '' }, '关掉以后人格说什么就是什么 —— 用 AGENT.md 当底稿时容易回成一整篇分析。'),
+          h('div', { 'data-fa-row': '' },
             h('span', { 'data-fa-label': '' }, '模型'),
             h('span', { 'data-fa-grow': '' },
               h(Text, { value: cfg.provider, placeholder: 'ark-code-latest', onChange: (v) => patch('provider', v) })),

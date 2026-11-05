@@ -50,6 +50,8 @@ export const DEFAULTS = {
   /** personaPrompt 非空时怎么用：append（接在底稿后）| replace（整份替换） */
   personaMode: 'append',
   personaPrompt: '',
+  /** 是否永远保留「评论区场景规则」（60 字以内、只输出正文…）。默认开 */
+  keepReplyRules: true,
   /** AGENT.md 路径。留空 = <DSH_HOME>/AGENT.md（桌面版 = ~/.dsh/AGENT.md） */
   agentMdPath: '',
   /** 回复前要不要去 dsh-memory-vector 捞相关旧事 */
@@ -116,16 +118,33 @@ export function readAgentMd(path) {
 }
 
 /**
+ * 评论场景的硬规则。**跟人格无关**，永远贴在 system 最后：
+ * 人格管「像谁在说」，这份管「在评论区怎么说话」。
+ * 教训（2026-11-05）：personaSource=agent-md 时如果把底稿整份换掉而不补这段，
+ * 「一句话到两句、60 字以内、只输出正文」这些约束就全没了 —— B 站那条回复会变成
+ * 一篇带小标题的分析报告，主人当场就问「为什么和你差这么多」。
+ */
+const REPLY_RULES = [
+  '[这条回复的场景规则，优先于上面的一切风格描述]',
+  '- 在 B 站评论区回一条，一句话到两句话，60 字以内。',
+  '- 只输出回复正文：不要小标题、不要列表、不要加粗、不要引号、不要 @ 前缀。',
+  '- 不要提到设置项、插件、模型、记忆、判重、额度这些内部东西。',
+  '- 不要自称「主人」「本鱼」「人家」，也不要用「您」。',
+].join('\n')
+
+/**
  * 拼最终的 system prompt。
  *   source=agent-md  → 读 AGENT.md 当底稿；读不到 / 内容空 → 回落内置底稿
  *   personaMode=append  → personaPrompt 接在底稿后
- *   personaMode=replace → personaPrompt 整份替换底稿（留空就等于「什么都不要」）
+ *   personaMode=replace → personaPrompt 整份替换**底稿**（场景规则仍然在）
+ *   keepReplyRules=false → 连场景规则也不加（一般用不到）
  * @returns {{ system: string, source: 'builtin'|'agent-md', baseChars: number }}
  */
 export function buildSystemPrompt(input = {}) {
   const persona = String(input.personaPrompt ?? '').trim()
   const wantsReplace = String(input.personaMode ?? 'append').trim().toLowerCase() === 'replace'
   const wantsAgent = String(input.source ?? 'builtin').trim().toLowerCase() === 'agent-md'
+  const keepRules = input.keepReplyRules !== false
   const agentText = wantsAgent ? String(input.agentText ?? '').trim() : ''
   const source = agentText.length > 0 ? 'agent-md' : 'builtin'
   const base = agentText.length > 0 ? agentText : BASE_PERSONA
@@ -134,6 +153,7 @@ export function buildSystemPrompt(input = {}) {
   if (wantsReplace) system = persona
   else system = persona.length > 0 ? `${base}\n${persona}` : base
   if (system.trim().length === 0) system = BASE_PERSONA
+  if (keepRules) system = `${system}\n\n${REPLY_RULES}`
 
   return { system, source, baseChars: system.length }
 }
@@ -271,6 +291,8 @@ export const Config = !z ? undefined : z.object({
   personaSource: z.string().default('agent-md').extra('volatile', true),
   /** personaPrompt 的用法：append 追加 / replace 替换整份底稿 */
   personaMode: z.string().default('append').extra('volatile', true),
+  /** 是否永远保留评论区场景规则（60 字以内、只输出正文…） */
+  keepReplyRules: z.boolean().default(true).extra('volatile', true),
   /** AGENT.md 路径。留空 = <DSH_HOME>/AGENT.md */
   agentMdPath: z.string().default('').extra('volatile', true),
   /** 是否在回复前检索 dsh-memory-vector（要那个插件装着才有效） */
@@ -365,6 +387,7 @@ export function normalizeConfig(raw) {
   take('personaPrompt', isStr)
   take('personaSource', isStr)
   take('personaMode', isStr)
+  take('keepReplyRules', isBool)
   take('agentMdPath', isStr)
   take('memoryEnabled', isBool)
   take('memoryTopK', isNum)
@@ -638,6 +661,7 @@ function createWatcher(ctx, getConfig) {
       agentText: readAgentMd(resolveAgentMdPath(cfg)),
       personaPrompt: cfg.personaPrompt,
       personaMode: cfg.personaMode,
+      keepReplyRules: config.keepReplyRules !== false,
     })
     const memory = await fetchMemories(ctx, cfg, `${target.text ?? ''} ${video.title ?? ''}`, log)
     const draft = await generateReply(
@@ -870,6 +894,7 @@ export function apply(ctx, rawConfig = {}) {
         agentText: readAgentMd(resolveAgentMdPath(config)),
         personaPrompt: config.personaPrompt,
         personaMode: config.personaMode,
+        keepReplyRules: config.keepReplyRules !== false,
       })
       const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
       const draft = await generateReply(
@@ -936,6 +961,7 @@ export function apply(ctx, rawConfig = {}) {
           agentText: readAgentMd(resolveAgentMdPath(config)),
           personaPrompt: config.personaPrompt,
           personaMode: config.personaMode,
+          keepReplyRules: config.keepReplyRules !== false,
         }).source,
         personaMode: String(config.personaMode ?? DEFAULTS.personaMode),
         personaChars: buildSystemPrompt({
@@ -943,6 +969,7 @@ export function apply(ctx, rawConfig = {}) {
           agentText: readAgentMd(resolveAgentMdPath(config)),
           personaPrompt: config.personaPrompt,
           personaMode: config.personaMode,
+          keepReplyRules: config.keepReplyRules !== false,
         }).baseChars,
         memoryEnabled: config.memoryEnabled === true,
         memoryTopK: Number(config.memoryTopK) || DEFAULTS.memoryTopK,
@@ -1069,6 +1096,7 @@ export function apply(ctx, rawConfig = {}) {
         personaPrompt: config.personaPrompt ?? '',
         personaSource: config.personaSource ?? DEFAULTS.personaSource,
         personaMode: config.personaMode ?? DEFAULTS.personaMode,
+        keepReplyRules: config.keepReplyRules !== false,
         agentMdPath: config.agentMdPath ?? '',
         memoryEnabled: config.memoryEnabled === true,
         memoryTopK: config.memoryTopK,
@@ -1136,6 +1164,7 @@ export function apply(ctx, rawConfig = {}) {
         agentText: readAgentMd(resolveAgentMdPath(config)),
         personaPrompt: config.personaPrompt,
         personaMode: config.personaMode,
+        keepReplyRules: config.keepReplyRules !== false,
       })
       const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
       const draft = await generateReply(
@@ -1189,5 +1218,5 @@ export function apply(ctx, rawConfig = {}) {
 export const __test__ = {
   tidyReply, normalize, postReply, generateReply, resolveHome, allowSet, DEFAULTS,
   stripManagedBlock, buildSystemPrompt, readAgentMd, resolveAgentMdPath, dshHomeDir,
-  formatMemories, memoryEndpointOf, fetchMemories,
+  formatMemories, memoryEndpointOf, fetchMemories, BASE_PERSONA, REPLY_RULES,
 }

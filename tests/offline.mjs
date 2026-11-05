@@ -210,9 +210,18 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   const append = buildSystemPrompt({ source: 'builtin', personaPrompt: '更贱一点', personaMode: 'append' })
   ok('append：底稿还在', append.system.includes('小肥鱼') && append.system.includes('更贱一点'))
   const replace = buildSystemPrompt({ source: 'builtin', personaPrompt: '你是子非鱼', personaMode: 'replace' })
-  ok('replace：底稿被顶掉', !replace.system.includes('小肥鱼') && replace.system === '你是子非鱼')
+  ok('replace：底稿被顶掉', !replace.system.includes('小肥鱼') && replace.system.startsWith('你是子非鱼'))
+  ok('replace：场景规则仍然在', replace.system.includes('60 字以内') && replace.system.includes('只输出回复正文'))
   const replaceEmpty = buildSystemPrompt({ source: 'builtin', personaPrompt: '   ', personaMode: 'replace' })
   ok('replace + 空串：不允许空 system（回落底稿）', replaceEmpty.system.includes('小肥鱼'))
+
+  // 2026-11-05 的回归：agent-md 把底稿整份替换后，评论场景规则一度全丢，
+  // B 站回复变成带小标题的分析报告。三种来源都必须带上场景规则。
+  ok('builtin 也带场景规则', builtin.system.includes('60 字以内'))
+  ok('agent-md 也带场景规则', fromAgent.system.includes('60 字以内') && fromAgent.system.includes('不要小标题'))
+  ok('场景规则排在人格之后（后者权重更高）', fromAgent.system.indexOf('你是子非鱼') < fromAgent.system.indexOf('场景规则'))
+  const noRules = buildSystemPrompt({ source: 'agent-md', agentText: md, keepReplyRules: false })
+  ok('keepReplyRules=false 时才不加', !noRules.system.includes('60 字以内'))
 }
 
 // ── 记忆：formatMemories 裁剪规则 ─────────────────────────────────────────
@@ -438,7 +447,7 @@ const timersCreated = (fn) => {
 // ── DEFAULTS 完整性 ─────────────────────────────────────────────────────
 eq('DEFAULTS 覆盖关键参数', Object.keys(DEFAULTS).sort(), [
   'agentMdPath', 'allowUids', 'credentialPath', 'dryRun', 'enabled', 'home', 'includeOthers',
-  'intervalMinutes', 'maxChars', 'maxPerDay', 'memoryAllowFtsOnly', 'memoryEnabled', 'memoryEndpoint',
+  'intervalMinutes', 'keepReplyRules', 'maxChars', 'maxPerDay', 'memoryAllowFtsOnly', 'memoryEnabled', 'memoryEndpoint',
   'memoryMaxChars', 'memoryMinScore', 'memoryScope', 'memoryTopK', 'minGapMinutes', 'model',
   'personaMode', 'personaPrompt', 'personaSource', 'provider',
 ].sort())
