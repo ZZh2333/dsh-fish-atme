@@ -33,6 +33,8 @@
 
 ## 它做什么
 
+**只做三件事**：监听 @ → 把结果摘要成一句话 → 回到那条评论下面。
+
 ```
  每 5 分钟（可配）
       │
@@ -44,13 +46,19 @@
    写一行日志                    GET /x/web-interface/view（拿标题/UP）
                                              │
                                              ▼
-                                  模型写一句回复（provider/model 可配）
+                          调「刷B站」bili_subtitle 取字幕（材料，原样搬运）
+                                             │
+                                             ▼
+                          模型读懂视频 → 写一句 ≤80 字（provider/model 可配）
                                              │
                             dryRun=true ─────┴─────► 只把草稿写进日志
                                              │
                                              ▼
                                 POST /x/v2/reply/add（以你的账号发出去）
 ```
+
+**视频理解不归它管。** 取字幕、判断视频讲了什么，都是刷B站（`dsh-bili-scroll`）那边的事；本插件只做
+「取参 → 超时 → 降级 → 长度护栏 → 交给模型 → 摘要 → 发评」这一圈搬运工作，**不实现任何挑段 / 加权 / 摘要算法**。
 
 两部分：
 
@@ -251,7 +259,7 @@ POST <本机 origin>/api/memory-vector/search    { query, k, scope }
   开发对话塞进 prompt，语气反而更怪。库越充实，阈值越好用。
 - 地址默认从 `ctx.webServer.getOrigin()` 推，也可以用 `memoryEndpoint` 指到别处。
 
-### 看视频：先看懂，再回话
+### 看视频：材料由刷B站给，本插件只搬运
 
 只拿「标题 + 你的评论」回话，等于闭着眼睛接梗 —— 遇到知识型视频容易答成「一句正确的废话」。
 所以回复前会**先问「刷B站」要字幕**：
@@ -260,20 +268,23 @@ POST <本机 origin>/api/memory-vector/search    { query, k, scope }
 ctx.tools.get('bili_subtitle').execute({ bvid })   →  { text }
 ```
 
-拿到字幕 → 把 ASR 碎行接成一段 → 按 `videoContextMaxChars` 截 → 塞进 user prompt，并注明
-「AI 字幕，可能有识别错误；用得上就接着聊，用不上别硬扯」。
+拿到字幕 → 把 ASR 碎行接成一段 → 塞进 user prompt → 模型读完自己判断哪里能接话 → 摘要成 ≤80 字 → 发出去。
 
-- **依赖**：「刷B站」（`dsh-bili-scroll`）。没装/没启用 → 日志提一次，这条退回只看标题，不报错、不卡住。
-- **看多深**（`videoContext`）：
-  - `full`（默认）：字幕装得下就给**全文**；装不下（超 `videoContextMaxChars`，默认 8000 字）就拼
-    「**开头 ＋ 你评论里提到的那些段 ＋ 结尾**」，中间用 `…` 标出跳过处 —— 长视频的答案通常在 60% 之后，
-    一刀砍在开头等于白读。
-  - `head`：只取开头（旧行为，最省）。
-  - `off`：不看，只凭标题回。
-- 「你提到的那些段」怎么找：中文没有分词器，就拿评论的**二字组合**去字幕里找（统一小写，`super-agent` 也能命中
-  `Super-agent`），按「词长 ÷ log(出现次数)」给每个词加权 —— 越具体、越少见的词分越高，免得「会话」这种满片子的词
-  把「调度实验」淹掉。然后以每个命中点为圆心开窗、挑分最高的最多 3 段，预算不够时从窗口**正中**取。
-  一个词都没命中（比如只写了「哈哈哈哈」）→ 改成**全片均匀抽样**，中后段也在。
+**边界很清楚**：
+
+| 谁 | 干什么 |
+|---|---|
+| 刷B站（`dsh-bili-scroll`） | 登录、wbi 签名、调 `/x/player/*`、拿到字幕原文 |
+| 模型 | **读懂**字幕，决定接哪句话 |
+| 本插件 | 取参、超时、降级、长度护栏、摘要口径、发评论 |
+
+本插件里**没有**「挑段 / 关键词加权 / 摘要视频内容」这类逻辑 —— 那属于理解，属于刷B站和模型。
+
+- **依赖**：「刷B站」。没装/没启用 → 日志提一次，这条退回只看标题，不报错、不卡住。
+- **开关**（`videoContext`）：`full`（默认，带字幕）/ `off`（只凭标题回）。
+- **长度护栏**（`videoContextMaxChars`，默认 12000 字）：**纯成本控制，不是理解**。
+  字幕短于上限就一个字不少地给；超了才从**尾巴**截断，并在 prompt 里写明「全长 N 字，这里只放了前 M 字，
+  后半段你没看到，别假装看过」。
 - **为什么不自己签**：实测直连 `/x/player/v2` 与 `/x/player/wbi/v2`（不带 wbi 签名）**都返回 `subs: 0`** ——
   code 是 0，字幕是空，静默骗人；同一支视频走刷B站的 `bili_subtitle` 能拿到 258 段。所以这里复用它的链路，
   不重复实现签名。
@@ -310,8 +321,8 @@ ctx.tools.get('bili_subtitle').execute({ bvid })   →  { text }
 | `memoryAllowFtsOnly` | bool | `false` | 是否接受「纯关键词命中」（没有余弦相似度，多半是噪音）。默认不接受 |
 | `memoryScope` | string | `global` | 检索范围：`global` / `workspace-first` / `workspace` |
 | `memoryEndpoint` | string | `""` | 检索地址，留空 = `<本机 origin>/api/memory-vector/search` |
-| `videoContext` | `full` \| `head` \| `off` | `full` | 看懂视频的方式：`full` 全片（超长按你的评论挑重点段）、`head` 只取开头、`off` 不看。老值 `subtitle` 等同 `head` |
-| `videoContextMaxChars` | int | `8000` | 字幕最多占多少字符；`full` 模式超了会「开头＋关键词段＋结尾」，不是硬砍 |
+| `videoContext` | `full` \| `off` | `full` | 回复前要不要把刷B站给的视频字幕带进 prompt。老值 `head`/`subtitle` 一律当 `full`（本插件不再区分取法） |
+| `videoContextMaxChars` | int | `12000` | 字幕最多占多少字符 —— 纯成本护栏，超了从尾巴截断并如实告知模型 |
 | `videoContextTimeoutMs` | int | `20000` | 等字幕最多等多久，超时就放弃这条的字幕 |
 | `credentialPath` | string | `""` | 凭证文件路径，留空 = `<home>/bili_credential.json` |
 | `home` | string | `""` | 数据目录，留空 = `$DSH_HOME/fish-atme`（默认 `~/.dsh/fish-atme`） |

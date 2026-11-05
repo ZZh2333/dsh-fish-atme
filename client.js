@@ -336,29 +336,17 @@ window.__ModuleLoader__.load({
         // ── 看视频 ──
         h('div', { 'data-fa-sec': '' },
           h('div', { 'data-fa-h': '' }, '看视频'),
+          h('div', { 'data-fa-note': '' }, '视频理解由「刷B站」负责（bili_subtitle）；本插件只管把字幕搬进 prompt，不挑段、不解读。'),
           h('div', { 'data-fa-row': '' },
-            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '回复前先看懂视频（调「刷B站」取字幕）'),
+            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '回复前带上视频字幕'),
             h(Switch, {
               on: cfg.videoContext !== 'off',
               onChange: (v) => patch('videoContext', v ? 'full' : 'off'),
             }),
           ),
           h('div', { 'data-fa-note': '' }, cfg.subtitleToolAvailable
-            ? '现在能拿到 bili_subtitle：回复前会读一遍字幕，接话才接得上内容。'
+            ? '现在能拿到 bili_subtitle：回复前会把字幕全文带进去，接话才接得上内容。'
             : '⚠️ 没找到 bili_subtitle 工具 —— 先装/启用「刷B站」(dsh-bili-scroll)，否则只能凭标题回。'),
-          cfg.videoContext !== 'off'
-            ? h('div', { 'data-fa-row': '' },
-              h('span', { 'data-fa-label': '' }, '看多深'),
-              h(Choices, {
-                value: cfg.videoContext === 'head' ? 'head' : 'full',
-                options: [
-                  ['full', '全片（超长按评论挑段）'],
-                  ['head', '只取开头'],
-                ],
-                onChange: (v) => patch('videoContext', v),
-              }),
-            )
-            : null,
           cfg.videoContext !== 'off'
             ? h('div', { 'data-fa-row': '' },
               h('span', { 'data-fa-label': '' }, '字幕最多占'),
@@ -369,9 +357,7 @@ window.__ModuleLoader__.load({
             )
             : null,
           cfg.videoContext !== 'off'
-            ? h('div', { 'data-fa-note': '' }, cfg.videoContext === 'head'
-              ? '只取开头：更省，但长视频后半段的答案会看不到。'
-              : '全片：字幕装得下就给全文；装不下就「开头 ＋ 你评论里提到的那些段 ＋ 结尾」，不会一刀砍掉后半段。')
+            ? h('div', { 'data-fa-note': '' }, '这是纯成本护栏：字幕短于上限就一个字不少地给，超了才从尾巴截断，并告诉模型「后半段没看到」。')
             : null,
           cfg.videoContext !== 'off'
             ? h('div', { 'data-fa-note': '' }, '字幕是 ASR 转的，会有错别字；没字幕的视频就只看标题，不会卡住。')

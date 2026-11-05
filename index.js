@@ -64,10 +64,10 @@ export const DEFAULTS = {
   memoryScope: 'global',
   /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
   memoryEndpoint: '',
-  /** 回复前要不要先看懂视频：full（全片字幕，超长按他的评论挑重点段）| head（只取开头）| off */
+  /** 要不要把刷B站给的字幕带进 prompt：full / off。取字幕、理解视频都是刷B站的活 */
   videoContext: 'full',
-  /** 字幕最多占多少字符；full 模式下超了不是硬砍，而是挑段 */
-  videoContextMaxChars: 8000,
+  /** 字幕最多占多少字符（纯成本护栏，超了就如实告诉模型「后半段没看到」） */
+  videoContextMaxChars: 12000,
   /** 等字幕最多等多久（毫秒），超时就只看标题 */
   videoContextTimeoutMs: 20000,
   credentialPath: '',
@@ -298,8 +298,11 @@ export function extractSubtitleText(value) {
   return ''
 }
 
-/** 字幕是 ASR 断句的碎行，进 prompt 之前把换行接成逗号。 */
-function flattenSubtitle(text) {
+/**
+ * 字幕是 ASR 断句的碎行，换行接成逗号 —— 这是**格式适配**，不是理解。
+ * 本插件不做「挑段 / 加权 / 摘要视频内容」这类事：那是刷B站（和模型）的活。
+ */
+export function flattenSubtitle(text) {
   return String(text ?? '')
     .replace(/\s*\n+\s*/g, '，')
     .replace(/，{2,}/g, '，')
@@ -307,157 +310,23 @@ function flattenSubtitle(text) {
     .trim()
 }
 
-/** 老行为：只取开头 N 字。 */
-export function formatVideoContext(text, maxChars = 800) {
-  const budget = Math.max(0, Number(maxChars) || 0)
-  if (budget === 0) return ''
+/**
+ * 成本护栏，不是理解：字幕太长就按字符截断，并把「本来多长、给了多少」如实告诉模型。
+ * 绝不在这里挑"重要段落" —— 那需要读懂内容，属于理解层，归刷B站那边。
+ * @returns {{ text: string, total: number }} total = 字幕原本字数
+ */
+export function clampSubtitle(text, maxChars = 12000) {
   const flat = flattenSubtitle(text)
-  if (flat.length <= budget) return flat
-  return `${flat.slice(0, Math.max(0, budget - 1))}…`
+  const budget = Math.max(0, Number(maxChars) || 0)
+  if (budget === 0) return { text: '', total: flat.length }
+  if (flat.length <= budget) return { text: flat, total: flat.length }
+  return { text: `${flat.slice(0, Math.max(0, budget - 1))}…`, total: flat.length }
 }
 
-/** 三种取法：off 不看 / head 只取开头 / full 全片（超预算就按他的评论挑重点段）。 */
+/** 开 / 关。老值一律当「开」——本插件不再区分取法（取法是理解，不归它）。 */
 export function normalizeVideoMode(value) {
   const mode = String(value ?? '').trim().toLowerCase()
-  if (mode === 'off' || mode === 'none' || mode === 'false') return 'off'
-  if (mode === 'head' || mode === 'subtitle' || mode === 'prefix') return 'head'
-  return 'full'
-}
-
-const STOP_GRAMS = new Set([
-  '什么', '怎么', '这个', '那个', '我们', '他们', '你们', '为什', '么样', '一下',
-  '可以', '就是', '是不', '不是', '没有', '还是', '如果', '因为', '所以', '但是',
-  '觉得', '真的', '有点', '一个', '这些', '那些', '知道', '看看', '时候', '多少',
-])
-
-/**
- * 在字幕里找「他问的那个点」。
- * 中文没有分词器，就用评论里的二字组合当候选词去命中字幕 —— 命中越密集的地方越像他问的那段。
- * @returns {{start:number,end:number}[]} 按位置升序，互不重叠
- */
-export function pickRelevantWindows(flat, comment, budget, max = 3) {
-  const text = String(flat ?? '')
-  const ask = String(comment ?? '')
-  const room = Math.max(0, Number(budget) || 0)
-  if (!text || !ask || room <= 0) return []
-  // 统一小写再找（字幕里写的是 "Super-agent"，评论里是 "super-agent"）；
-  // 小写化对中文/ASCII 不改长度，所以下标可以直接回原文切
-  const hay = text.toLowerCase()
-
-  const grams = new Set()
-  for (const piece of ask.toLowerCase().split(/[^\u4e00-\u9fa5a-z0-9]+/)) {
-    if (piece.length < 2) continue
-    if (/^[a-z0-9]+$/.test(piece)) {
-      if (piece.length >= 3) grams.add(piece)
-      continue
-    }
-    for (let i = 0; i + 2 <= piece.length; i += 1) {
-      const gram = piece.slice(i, i + 2)
-      if (!STOP_GRAMS.has(gram)) grams.add(gram)
-    }
-  }
-  if (grams.size === 0) return []
-
-  // 每个词的权重 = 词长 / log(出现次数)：越具体、越少见的词越说明「他问的就是这段」。
-  // 否则「会话」这种片子里到处都有的词会把「调度实验」淹掉 —— 2026-11-05 实机踩到过。
-  const hits = []
-  const weightOf = new Map()
-  for (const gram of grams) {
-    const positions = []
-    let from = 0
-    for (let n = 0; n < 60; n += 1) {
-      const at = hay.indexOf(gram, from)
-      if (at < 0) break
-      positions.push(at)
-      from = at + gram.length
-    }
-    if (positions.length === 0) continue
-    weightOf.set(gram, gram.length / (1 + Math.log2(positions.length)))
-    for (const at of positions.slice(0, 12)) hits.push({ at, gram })
-  }
-  if (hits.length === 0) return []
-  hits.sort((a, b) => a.at - b.at)
-
-  // 以每个命中点为圆心开一个窗口，给窗口打分（窗口里出现过哪些词、这些词有多具体），
-  // 再取分数最高的几段、互不重叠。不用「先合并再切」——那样预算不够时容易从左边切，
-  // 把命中点本身切掉（2026-11-05 实机踩到：答案段盖住了，却被截在它前面）。
-  const radius = Math.max(150, Math.min(900, Math.floor(room / (max + 1))))
-  const cands = []
-  for (const hit of hits) {
-    const start = Math.max(0, hit.at - radius)
-    const end = Math.min(text.length, hit.at + radius)
-    const seen = new Set()
-    let score = 0
-    for (const other of hits) {
-      if (other.at < start || other.at >= end || seen.has(other.gram)) continue
-      seen.add(other.gram)
-      score += weightOf.get(other.gram) ?? 0
-    }
-    cands.push({ start, end, score, center: hit.at, grams: seen.size })
-  }
-  cands.sort((a, b) => b.score - a.score || b.grams - a.grams)
-
-  const picked = []
-  for (const cand of cands) {
-    if (picked.length >= max) break
-    if (picked.some((win) => cand.start < win.end && cand.end > win.start)) continue
-    picked.push(cand)
-  }
-  picked.sort((a, b) => a.start - b.start)
-  return picked.map(({ start, end }) => ({ start, end }))
-}
-
-/** 没有命中时的兜底：开头 + 全片均匀抽样，保证中后段也在。 */
-function evenSample(flat, budget) {
-  const head = Math.min(800, Math.floor(budget * 0.3))
-  const rest = budget - head - 1
-  const chunks = 4
-  const size = Math.floor(rest / chunks)
-  if (size < 80) return `${flat.slice(0, Math.max(0, budget - 1))}…`
-  const parts = [flat.slice(0, head)]
-  const span = flat.length - head - size
-  const steps = Math.max(1, chunks - 1)
-  for (let i = 0; i < chunks; i += 1) {
-    // 最后一块必须贴住片尾，否则长视频的结尾永远看不到
-    const start = head + Math.max(0, Math.floor((span * i) / steps))
-    parts.push(flat.slice(start, start + size))
-  }
-  return parts.join('…')
-}
-
-/**
- * 把字幕变成进 prompt 的那一段。`full` 模式下超长时不再"一刀砍掉后半段"，
- * 而是「开头 + 他问的那几段 + 结尾」—— 长视频的答案通常不在开头。
- */
-export function buildVideoContext(text, comment, maxChars = 8000, mode = 'full') {
-  const flat = flattenSubtitle(text)
-  const budget = Math.max(0, Number(maxChars) || 0)
-  if (!flat || budget === 0) return ''
-  if (flat.length <= budget) return flat
-  const how = normalizeVideoMode(mode)
-  if (how === 'head') return `${flat.slice(0, Math.max(0, budget - 1))}…`
-
-  const head = Math.min(800, Math.floor(budget * 0.2))
-  const tail = Math.min(300, Math.floor(budget * 0.08))
-  const room = Math.max(0, budget - head - tail - 4)
-  const windows = pickRelevantWindows(flat, comment, room, 3).filter((win) => win.start >= head)
-  if (windows.length === 0) return evenSample(flat, budget)
-
-  const parts = [flat.slice(0, head)]
-  const need = windows.reduce((sum, win) => sum + (win.end - win.start), 0) || 1
-  let left = room
-  for (const win of windows) {
-    if (left <= 40) break
-    const len = win.end - win.start
-    const share = Math.max(80, Math.min(left, Math.round((room * len) / need)))
-    // 预算不够时从中间取：命中点通常在窗口正中，这样不会把答案截掉
-    const cut = Math.max(0, Math.floor((len - share) / 2))
-    parts.push(flat.slice(win.start + cut, win.start + cut + share))
-    left -= share
-  }
-  if (tail > 0) parts.push(flat.slice(flat.length - tail))
-  const joined = parts.join('…')
-  return joined.length <= budget ? joined : `${joined.slice(0, budget - 1)}…`
+  return mode === 'off' || mode === 'none' || mode === 'false' ? 'off' : 'full'
 }
 
 /** 「刷B站」（dsh-bili-scroll）注册的取字幕工具；没装 / 没启用就是 null。 */
@@ -471,11 +340,11 @@ export function subtitleToolOf(ctx) {
 }
 
 /**
- * 回复前先看懂视频：调刷B站的 bili_subtitle 拿字幕，压成一段塞进 prompt。
+ * 取材料：把刷B站给的**字幕正文**原样搬回去，不做任何内容层面的裁剪。
  * 任何失败都只是「这条只能看标题」，不影响回复本身。
- * @returns {Promise<{ text: string, source: 'subtitle'|'off'|'none', chars: number, error?: string }>}
+ * @returns {Promise<{ text: string, source: 'subtitle'|'off'|'none', chars: number, total?: number, mode?: string, error?: string }>}
  */
-export async function fetchVideoContext(ctx, config, bvid, log, comment = '') {
+export async function fetchVideoContext(ctx, config, bvid, log) {
   const mode = normalizeVideoMode(config?.videoContext)
   if (mode === 'off') return { text: '', source: 'off', chars: 0, mode }
   const id = String(bvid ?? '').trim()
@@ -500,18 +369,15 @@ export async function fetchVideoContext(ctx, config, bvid, log, comment = '') {
         timer = setTimeout(() => reject(new Error(`取字幕超时（${timeoutMs}ms）`)), timeoutMs)
       }),
     ])
-    const full = extractSubtitleText(raw)
-    const text = buildVideoContext(
-      full,
-      comment,
+    const { text, total } = clampSubtitle(
+      extractSubtitleText(raw),
       config?.videoContextMaxChars ?? DEFAULTS.videoContextMaxChars,
-      mode,
     )
     if (!text) {
       warnVideo(log, `视频 ${id} 没有可用字幕，这条只能看标题`)
       return { text: '', source: 'subtitle', chars: 0, mode, error: '没有字幕' }
     }
-    return { text, source: 'subtitle', chars: text.length, mode, total: flattenSubtitle(full).length }
+    return { text, source: 'subtitle', chars: text.length, total, mode }
   } catch (error) {
     warnVideo(log, `取字幕失败（已忽略，照常回）：${error?.message ?? error}`)
     return { text: '', source: 'subtitle', chars: 0, mode, error: String(error?.message ?? error) }
@@ -572,10 +438,10 @@ export const Config = !z ? undefined : z.object({
   memoryScope: z.string().default('global').extra('volatile', true),
   /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
   memoryEndpoint: z.string().default('').extra('volatile', true),
-  /** 看懂视频的方式：full（全片字幕，超长按他的评论挑重点段）| head（只取开头）| off */
+  /** 要不要带字幕进 prompt：full / off。取字幕靠刷B站，本插件不解读内容 */
   videoContext: z.string().default('full').extra('volatile', true),
-  /** 字幕最多占多少字符；full 模式下超了会「开头 + 关键词段 + 结尾」，不是硬砍 */
-  videoContextMaxChars: z.natural().default(8000).extra('volatile', true),
+  /** 字幕最多占多少字符（成本护栏） */
+  videoContextMaxChars: z.natural().default(12000).extra('volatile', true),
   /** 等字幕最多等多久（毫秒），超时就只看标题 */
   videoContextTimeoutMs: z.natural().default(20000).extra('volatile', true),
   /** B 站凭证文件路径。留空 = <home>/bili_credential.json */
@@ -820,13 +686,14 @@ async function generateReply(llm, system, info, signal) {
   )
   const content = String(info?.videoContext ?? '').trim()
   if (content) {
-    // 全片时要说清楚「他问的点可能在中后段」，否则模型容易只顺着开场聊
-    const whole = content.length > 1500
+    // 字幕是刷B站给的**原文**，这里只如实说明「给了多少、有没有截」，不替模型做筛选
+    const total = Number(info?.videoContextTotal) || content.length
+    const cut = total > content.length
     lines.push(
-      whole
-        ? '【这个视频的全片字幕（AI 转写，可能有错别字；中间用…断开的地方就是跳过的段落）。'
-          + '他说的点可能在中后段，先找到最相关的那段再开口；用得上就接着聊，用不上别硬扯】'
-        : '【这个视频的实际内容（AI 字幕，可能有识别错误；用得上就接着聊，用不上别硬扯）】',
+      cut
+        ? `【这个视频的字幕（AI 转写，可能有错别字）。全长 ${total} 字，太长只放下了前 ${content.length} 字，`
+          + '后半段你没看到，别假装看过；用得上就接着聊，用不上别硬扯】'
+        : `【这个视频的字幕全文（${content.length} 字，AI 转写可能有错别字；用得上就接着聊，用不上别硬扯）】`,
       content,
       '',
     )
@@ -952,7 +819,7 @@ export function createWatcher(ctx, getConfig) {
       keepReplyRules: cfg.keepReplyRules !== false,
     })
     const memory = await fetchMemories(ctx, cfg, `${target.text ?? ''} ${video.title ?? ''}`, log)
-    const videoCtx = await fetchVideoContext(ctx, cfg, video.bvid, log, target.text)
+    const videoCtx = await fetchVideoContext(ctx, cfg, video.bvid, log)
     if (videoCtx.chars > 0) {
       log(`看懂了视频：字幕 ${videoCtx.chars}/${videoCtx.total ?? videoCtx.chars} 字进 prompt（${videoCtx.mode}）`)
     }
@@ -966,6 +833,7 @@ export function createWatcher(ctx, getConfig) {
         model: cfg.model,
         memoryLines: memory.lines,
         videoContext: videoCtx.text,
+        videoContextTotal: videoCtx.total,
       },
       undefined,
     )
@@ -1149,7 +1017,7 @@ export function apply(ctx, rawConfig = {}) {
       keepReplyRules: config.keepReplyRules !== false,
     })
     const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
-    const videoCtx = await fetchVideoContext(ctx, config, video.bvid ?? bvid, log, target.text)
+    const videoCtx = await fetchVideoContext(ctx, config, video.bvid ?? bvid, log)
     const draft = await generateReply(
       ctx.llm,
       persona.system,
@@ -1160,6 +1028,7 @@ export function apply(ctx, rawConfig = {}) {
         model: config.model,
         memoryLines: memory.lines,
         videoContext: videoCtx.text,
+        videoContextTotal: videoCtx.total,
       },
       signal,
     )
@@ -1215,7 +1084,7 @@ export function apply(ctx, rawConfig = {}) {
         if (!value?.ok) return [{ type: 'text', text: '没生成出来。' }]
         const videoLine = value.videoContextChars > 0
           ? `视频内容：字幕 ${value.videoContextChars} 字进了 prompt`
-            + `${value.videoContextTotal > value.videoContextChars ? `（全片 ${value.videoContextTotal} 字，按他的评论挑了重点段）` : '（全片）'}`
+            + `${value.videoContextTotal > value.videoContextChars ? `（全长 ${value.videoContextTotal} 字，太长只给了前段）` : '（全文）'}`
           : value.videoContextSource === 'off' ? '视频内容：开关关着，只看标题'
             : value.videoContextError ? `视频内容：没拿到（${value.videoContextError}），只看标题`
               : '视频内容：没带，只看标题'
@@ -1286,8 +1155,8 @@ export function apply(ctx, rawConfig = {}) {
             `记忆：${value.memoryEnabled ? (value.memoryEndpoint ? `开（topK ${value.memoryTopK}）` : '开，但找不到检索地址') : '关'}`,
             `看视频：${value.videoContext === 'off' ? '关（只凭标题回）'
               : value.subtitleToolAvailable
-                ? `开（${value.videoContext === 'head' ? '只取开头' : '全片字幕，超长按评论挑重点段'}；`
-                  + `上限 ${value.videoContextChars} 字，调刷B站的 bili_subtitle）`
+                ? '开（字幕由刷B站的 bili_subtitle 提供，本插件只搬运＋摘要；'
+                  + `上限 ${value.videoContextChars} 字）`
                 : '想开，但没找到 bili_subtitle —— 先装/启用「刷B站」'}`,
             `最近一条：${value.lastText ?? '(无)'}`,
             `状态文件：${value.stateFile}`,
@@ -1528,7 +1397,7 @@ export function apply(ctx, rawConfig = {}) {
         keepReplyRules: config.keepReplyRules !== false,
       })
       const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
-      const videoCtx = await fetchVideoContext(ctx, config, video.bvid, log, target.text)
+      const videoCtx = await fetchVideoContext(ctx, config, video.bvid, log)
       const draft = await generateReply(
         ctx.llm,
         persona.system,
@@ -1539,6 +1408,7 @@ export function apply(ctx, rawConfig = {}) {
           model: config.model,
           memoryLines: memory.lines,
           videoContext: videoCtx.text,
+          videoContextTotal: videoCtx.total,
         },
         undefined,
       )
@@ -1593,6 +1463,6 @@ export const __test__ = {
   tidyReply, normalize, postReply, generateReply, resolveHome, allowSet, DEFAULTS,
   stripManagedBlock, buildSystemPrompt, readAgentMd, resolveAgentMdPath, dshHomeDir,
   formatMemories, memoryEndpointOf, fetchMemories, BASE_PERSONA, REPLY_RULES,
-  extractSubtitleText, formatVideoContext, subtitleToolOf, fetchVideoContext,
-  normalizeVideoMode, pickRelevantWindows, buildVideoContext,
+  extractSubtitleText, subtitleToolOf, fetchVideoContext,
+  normalizeVideoMode, clampSubtitle, flattenSubtitle,
 }

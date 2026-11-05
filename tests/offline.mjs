@@ -9,8 +9,8 @@ import {
   apply, Config, DEFAULTS, name as pluginName, normalizeConfig, createWatcher, __test__,
 } from '../index.js'
 import {
-  extractSubtitleText, formatVideoContext, fetchVideoContext,
-  normalizeVideoMode, pickRelevantWindows, buildVideoContext,
+  extractSubtitleText, fetchVideoContext,
+  normalizeVideoMode, clampSubtitle, flattenSubtitle,
 } from '../index.js'
 
 /** 每个用例一个临时目录，跑完就删 */
@@ -247,57 +247,34 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   eq('没字幕（只有 message）→ 空串', extractSubtitleText({ message: '该视频没有字幕' }), '')
   eq('null 不炸', extractSubtitleText(null), '')
 
-  // ASR 碎行接成一句，再按预算截
-  eq('碎行接成逗号', formatVideoContext('第一句\n第二句\n\n第三句', 100), '第一句，第二句，第三句')
-  eq('不超预算就不截', formatVideoContext('短字幕', 100), '短字幕')
-  eq('超预算截断并加省略号', formatVideoContext('一'.repeat(50), 10), `${'一'.repeat(9)}…`)
-  eq('预算 0 = 不要内容', formatVideoContext('随便', 0), '')
+  // ── 0.6.0：本插件只做「搬运 + 长度护栏」，不做理解 ──
+  eq('模式识别：只有开/关', [normalizeVideoMode('FULL'), normalizeVideoMode(undefined), normalizeVideoMode('off'), normalizeVideoMode('head')], ['full', 'full', 'off', 'full'])
 
-  // ── 0.5.0：不再「一刀砍掉后半段」──
-  eq('模式识别：老配置 subtitle = 只看开头', normalizeVideoMode('subtitle'), 'head')
-  eq('模式识别：大小写/空值', [normalizeVideoMode('FULL'), normalizeVideoMode(undefined), normalizeVideoMode('off')], ['full', 'full', 'off'])
+  // 护栏：短的原样、长的按字符截断，并如实报出「本来多长」
+  {
+    const short = clampSubtitle('第一句\n第二句', 100)
+    eq('短字幕原样搬运（只接逗号）', [short.text, short.total], ['第一句，第二句', 7])
+    const long = '一'.repeat(50)
+    const cut = clampSubtitle(long, 10)
+    eq('超预算就截断（不挑段）', cut.text, `${'一'.repeat(9)}…`)
+    eq('报出原本多长', cut.total, 50)
+    eq('预算 0 = 不带字幕', clampSubtitle('随便', 0).text, '')
+  }
 
-  // 造一支「开头寒暄、中段有架构、结尾有实验数字」的长视频。
-  // 特意埋了诱饵：开头就出现「活跃会话」「实验」这些泛词 —— 实机上正是它们把真正的答案段挤掉了
-  const longVideo = [
-    '大家好我是娜娜，一个 AI 已经能帮你写代码查问题提交修改，但如果同时交给它几项工作，你可能还得开好几个对话框。',
-    '一个人通常只能同时跟进三到五个活跃会话，继续增加窗口意味着你要记住更多背景，实验里也反复提到会话这个词。',
-    '，团队把全局协调与具体执行拆成两层，上面叫 Router，下面叫 Worker，Router 不亲自执行具体工作。',
-    '这是一段和问题无关的铺垫内容，'.repeat(300),
-    '，团队做了初步的调度实验，Super-agent 的任务完成时间中位数是 12.4 分钟，95 分位是 15.7 分钟；单会话的 95 分位达到 29.5 分钟。',
-    '这是一段和问题无关的结尾铺垫，'.repeat(160),
-    '如果你喜欢本期视频记得订阅点赞，我们下期再见。',
-  ].join('')
-
-  ok('长视频确实超预算', longVideo.length > 6000, `${longVideo.length} 字`)
-  const ask = '那个调度实验里 super-agent 和单会话差多少？'
-  // 关键回归：预算只有 1200 时，也必须挑到「调度实验」那段，而不是开头那段「活跃会话」
-  const tight = buildVideoContext(longVideo, ask, 1200, 'full')
-  ok('预算 1200 也能挑中答案段（12.4 / 29.5）', tight.includes('12.4') && tight.includes('29.5'), tight.slice(0, 160))
-  ok('预算 1200 不超预算', tight.length <= 1200, `${tight.length} 字`)
-  ok('小写评论能命中大写的 Super-agent', pickRelevantWindows(longVideo, 'super-agent 那段', 800, 3).length > 0)
-
-  const picked = buildVideoContext(longVideo, ask, 3000, 'full')
-  ok('full 模式不超预算', picked.length <= 3000, `${picked.length} 字`)
-  ok('把他问的那段找回来了（12.4 / 29.5 都在）', picked.includes('12.4') && picked.includes('29.5'), picked.slice(0, 120))
-  ok('开头和结尾也留着', picked.startsWith('大家好我是娜娜') && picked.includes('我们下期再见'))
-  ok('中间用 … 标出跳过的段落', picked.includes('…'))
-
-  const headOnly = buildVideoContext(longVideo, ask, 3000, 'head')
-  ok('head 模式只看开头 —— 拿不到 12.4', !headOnly.includes('12.4'), `${headOnly.length} 字`)
-
-  // 评论是纯闲聊（没有可用关键词）→ 均匀抽样，覆盖全片而不是只有开头
-  const sampled = buildVideoContext(longVideo, '哈哈哈哈来了', 3000, 'full')
-  ok('没命中关键词也不只给开头', sampled.includes('我们下期再见'), `${sampled.length} 字`)
-  ok('均匀抽样也不超预算', sampled.length <= 3000, `${sampled.length} 字`)
-
-  eq('没评论时挑不出窗口', pickRelevantWindows(longVideo, '', 1000, 3), [])
-  eq('预算 0 时不挑窗口', pickRelevantWindows(longVideo, '调度实验', 0, 3), [])
-  ok('挑出的窗口互不重叠', (() => {
-    const wins = pickRelevantWindows(longVideo, ask, 2400, 3)
-    for (let i = 1; i < wins.length; i += 1) if (wins[i].start < wins[i - 1].end) return false
-    return wins.length > 0
-  })())
+  // 关键点：同一段 5545 字字幕，只要预算够，**一个字都不许少**（理解归刷B站，不归这里）
+  {
+    const real = [
+      '大家好我是娜娜，一个 AI 已经能帮你写代码查问题提交修改。',
+      '一个人通常只能同时跟进三到五个活跃会话，实验里也反复提到会话这个词。',
+      '，团队做了初步的调度实验，Super-agent 的任务完成时间中位数是 12.4 分钟，95 分位是 15.7 分钟；单会话的 95 分位达到 29.5 分钟。',
+      '如果你喜欢本期视频记得订阅点赞，我们下期再见。',
+    ].join('')
+    const full = clampSubtitle(real, 12000)
+    eq('预算够就原样全给', full.text, flattenSubtitle(real))
+    ok('没有加任何省略号', !full.text.includes('…'), full.text.slice(-40))
+    ok('结尾也在（没被截）', full.text.endsWith('我们下期再见。'))
+    eq('total 与实际长度一致', full.total, full.text.length)
+  }
 
   // 取字幕：工具在 → 拿到正文
   {
@@ -306,12 +283,22 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
     eq('拿到字幕', [got.source, got.chars > 0], ['subtitle', true])
     ok('字幕正文进得去', got.text.includes('装插件'))
   }
-  // 长视频 + 评论相关 → 端到端也走「挑段」而不是砍头
+  // 长视频 + 预算不够 → 只做长度截断，并如实报出原长（不挑段）
   {
-    const ctx = { tools: { get: () => ({ execute: async () => ({ text: longVideo }) }) } }
-    const got = await fetchVideoContext(ctx, { videoContext: 'full', videoContextMaxChars: 3000 }, 'BV1xx411c7mD', () => {}, ask)
-    ok('端到端：按评论挑段（12.4 在）', got.text.includes('12.4'), `${got.chars}/${got.total}`)
-    ok('端到端：报出全片字数', got.total > got.chars, `total=${got.total} chars=${got.chars}`)
+    const longText = `${'无关铺垫，'.repeat(800)}这段是结尾的答案。`
+    const ctx = { tools: { get: () => ({ execute: async () => ({ text: longText }) }) } }
+    const got = await fetchVideoContext(ctx, { videoContext: 'full', videoContextMaxChars: 3000 }, 'BV1xx411c7mD', () => {})
+    eq('端到端：按预算截断', got.chars, 3000)
+    ok('端到端：报出字幕原本多长', got.total > got.chars, `total=${got.total} chars=${got.chars}`)
+    ok('端到端：截断处有省略号', got.text.endsWith('…'))
+  }
+  // 预算够 → 一个字都不许少（这是「不替刷B站做理解」的硬约束）
+  {
+    const text = '开头。中间。结尾。'
+    const ctx = { tools: { get: () => ({ execute: async () => ({ text }) }) } }
+    const got = await fetchVideoContext(ctx, { videoContext: 'full', videoContextMaxChars: 12000 }, 'BV1xx411c7mD', () => {})
+    eq('预算够就全量搬运', got.text, flattenSubtitle(text))
+    eq('总长一致', got.total, got.chars)
   }
   // 工具不在 → 只看标题，且不抛
   {
