@@ -5,7 +5,13 @@
 import fsSync from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { apply, Config, DEFAULTS, name as pluginName, normalizeConfig, createWatcher, __test__ } from '../index.js'
+import {
+  apply, Config, DEFAULTS, name as pluginName, normalizeConfig, createWatcher, __test__,
+} from '../index.js'
+import {
+  extractSubtitleText, formatVideoContext, fetchVideoContext,
+  normalizeVideoMode, pickRelevantWindows, buildVideoContext,
+} from '../index.js'
 
 /** 每个用例一个临时目录，跑完就删 */
 const tmpRoot = () => fsSync.mkdtempSync(path.join(os.tmpdir(), 'fish-atme-test-'))
@@ -13,7 +19,6 @@ const tmpRoot = () => fsSync.mkdtempSync(path.join(os.tmpdir(), 'fish-atme-test-
 const {
   tidyReply, normalize, postReply, generateReply, resolveHome, allowSet,
   stripManagedBlock, buildSystemPrompt, readAgentMd, formatMemories, memoryEndpointOf, fetchMemories,
-  extractSubtitleText, formatVideoContext, fetchVideoContext,
 } = __test__
 
 let failed = 0
@@ -248,24 +253,71 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   eq('超预算截断并加省略号', formatVideoContext('一'.repeat(50), 10), `${'一'.repeat(9)}…`)
   eq('预算 0 = 不要内容', formatVideoContext('随便', 0), '')
 
+  // ── 0.5.0：不再「一刀砍掉后半段」──
+  eq('模式识别：老配置 subtitle = 只看开头', normalizeVideoMode('subtitle'), 'head')
+  eq('模式识别：大小写/空值', [normalizeVideoMode('FULL'), normalizeVideoMode(undefined), normalizeVideoMode('off')], ['full', 'full', 'off'])
+
+  // 造一支「开头寒暄、中段有架构、结尾有实验数字」的长视频
+  const forVideo = (filler) => [
+    '大家好我是娜娜'.repeat(1),
+    filler.repeat(120),
+    '，团队把全局协调与具体执行拆成两层，上面叫 Router，下面叫 Worker。',
+    filler.repeat(160),
+    '，Super-agent 的任务完成时间中位数是 12.4 分钟，95 分位是 15.7 分钟；单会话的 95 分位达到 29.5 分钟。',
+    filler.repeat(160),
+    '如果你喜欢本期视频记得订阅点赞，我们下期再见。',
+  ].join('')
+  const longVideo = forVideo('这是一段和问题无关的铺垫内容，')
+
+  ok('长视频确实超预算', longVideo.length > 6000, `${longVideo.length} 字`)
+  const ask = '那个调度实验里 super-agent 和单会话差多少？'
+  const picked = buildVideoContext(longVideo, ask, 3000, 'full')
+  ok('full 模式不超预算', picked.length <= 3000, `${picked.length} 字`)
+  ok('把他问的那段找回来了（12.4 / 29.5 都在）', picked.includes('12.4') && picked.includes('29.5'), picked.slice(0, 120))
+  ok('开头和结尾也留着', picked.startsWith('大家好我是娜娜') && picked.includes('我们下期再见'))
+  ok('中间用 … 标出跳过的段落', picked.includes('…'))
+
+  const headOnly = buildVideoContext(longVideo, ask, 3000, 'head')
+  ok('head 模式只看开头 —— 拿不到 12.4', !headOnly.includes('12.4'), `${headOnly.length} 字`)
+
+  // 评论是纯闲聊（没有可用关键词）→ 均匀抽样，覆盖全片而不是只有开头
+  const sampled = buildVideoContext(longVideo, '哈哈哈哈来了', 3000, 'full')
+  ok('没命中关键词也不只给开头', sampled.includes('我们下期再见'), `${sampled.length} 字`)
+  ok('均匀抽样也不超预算', sampled.length <= 3000, `${sampled.length} 字`)
+
+  eq('没评论时挑不出窗口', pickRelevantWindows(longVideo, '', 1000, 3), [])
+  eq('预算 0 时不挑窗口', pickRelevantWindows(longVideo, '调度实验', 0, 3), [])
+  ok('挑出的窗口互不重叠', (() => {
+    const wins = pickRelevantWindows(longVideo, ask, 2400, 3)
+    for (let i = 1; i < wins.length; i += 1) if (wins[i].start < wins[i - 1].end) return false
+    return wins.length > 0
+  })())
+
   // 取字幕：工具在 → 拿到正文
   {
     const ctx = { tools: { get: (n) => n === 'bili_subtitle' ? { execute: async () => ({ text: '这条视频在讲用 DSH 装插件' }) } : null } }
-    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle', videoContextMaxChars: 800 }, 'BV1xx411c7mD', () => {})
+    const got = await fetchVideoContext(ctx, { videoContext: 'full', videoContextMaxChars: 8000 }, 'BV1xx411c7mD', () => {})
     eq('拿到字幕', [got.source, got.chars > 0], ['subtitle', true])
     ok('字幕正文进得去', got.text.includes('装插件'))
+  }
+  // 长视频 + 评论相关 → 端到端也走「挑段」而不是砍头
+  {
+    const ctx = { tools: { get: () => ({ execute: async () => ({ text: longVideo }) }) } }
+    const got = await fetchVideoContext(ctx, { videoContext: 'full', videoContextMaxChars: 3000 }, 'BV1xx411c7mD', () => {}, ask)
+    ok('端到端：按评论挑段（12.4 在）', got.text.includes('12.4'), `${got.chars}/${got.total}`)
+    ok('端到端：报出全片字数', got.total > got.chars, `total=${got.total} chars=${got.chars}`)
   }
   // 工具不在 → 只看标题，且不抛
   {
     const ctx = { tools: { get: () => null } }
-    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle' }, 'BV1xx411c7mD', () => {})
+    const got = await fetchVideoContext(ctx, { videoContext: 'full' }, 'BV1xx411c7mD', () => {})
     eq('没有刷B站 → 空内容', got.text, '')
     ok('报出原因', String(got.error ?? '').includes('未安装') || String(got.error ?? '').includes('未启用'))
   }
   // 工具抛错 → 吞掉
   {
     const ctx = { tools: { get: () => ({ execute: async () => { throw new Error('MCP 挂了') } }) } }
-    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle' }, 'BV1xx411c7mD', () => {})
+    const got = await fetchVideoContext(ctx, { videoContext: 'full' }, 'BV1xx411c7mD', () => {})
     eq('工具抛错不影响回复', got.text, '')
     ok('错误信息带出来', String(got.error ?? '').includes('MCP'))
   }
@@ -273,7 +325,7 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   {
     const ctx = { tools: { get: () => ({ execute: () => new Promise(() => {}) }) } }
     const started = Date.now()
-    const got = await fetchVideoContext(ctx, { videoContext: 'subtitle', videoContextTimeoutMs: 1200 }, 'BV1xx411c7mD', () => {})
+    const got = await fetchVideoContext(ctx, { videoContext: 'full', videoContextTimeoutMs: 1200 }, 'BV1xx411c7mD', () => {})
     ok('超时会放弃（不死等）', Date.now() - started < 4000, `用了 ${Date.now() - started}ms`)
     eq('超时也算没内容', got.text, '')
   }
@@ -286,7 +338,7 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   }
   // 没有 BV 号（动态）→ 静默跳过
   {
-    const got = await fetchVideoContext({ tools: { get: () => null } }, { videoContext: 'subtitle' }, '', () => {})
+    const got = await fetchVideoContext({ tools: { get: () => null } }, { videoContext: 'full' }, '', () => {})
     ok('没有 BV 号不报错', got.text === '' && String(got.error ?? '').includes('动态'))
   }
 }

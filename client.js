@@ -338,19 +338,40 @@ window.__ModuleLoader__.load({
           h('div', { 'data-fa-h': '' }, '看视频'),
           h('div', { 'data-fa-row': '' },
             h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '回复前先看懂视频（调「刷B站」取字幕）'),
-            h(Switch, { on: cfg.videoContext !== 'off', onChange: (v) => patch('videoContext', v ? 'subtitle' : 'off') }),
+            h(Switch, {
+              on: cfg.videoContext !== 'off',
+              onChange: (v) => patch('videoContext', v ? 'full' : 'off'),
+            }),
           ),
           h('div', { 'data-fa-note': '' }, cfg.subtitleToolAvailable
             ? '现在能拿到 bili_subtitle：回复前会读一遍字幕，接话才接得上内容。'
             : '⚠️ 没找到 bili_subtitle 工具 —— 先装/启用「刷B站」(dsh-bili-scroll)，否则只能凭标题回。'),
           cfg.videoContext !== 'off'
             ? h('div', { 'data-fa-row': '' },
+              h('span', { 'data-fa-label': '' }, '看多深'),
+              h(Choices, {
+                value: cfg.videoContext === 'head' ? 'head' : 'full',
+                options: [
+                  ['full', '全片（超长按评论挑段）'],
+                  ['head', '只取开头'],
+                ],
+                onChange: (v) => patch('videoContext', v),
+              }),
+            )
+            : null,
+          cfg.videoContext !== 'off'
+            ? h('div', { 'data-fa-row': '' },
               h('span', { 'data-fa-label': '' }, '字幕最多占'),
-              h(Num, { value: cfg.videoContextMaxChars, min: 0, max: 3000, onChange: (v) => patch('videoContextMaxChars', v) }),
+              h(Num, { value: cfg.videoContextMaxChars, min: 0, max: 30000, onChange: (v) => patch('videoContextMaxChars', v) }),
               h('span', { 'data-fa-label': '' }, '字 · 最多等'),
               h(Num, { value: cfg.videoContextTimeoutMs, min: 1000, max: 60000, onChange: (v) => patch('videoContextTimeoutMs', v) }),
               h('span', { 'data-fa-label': '' }, 'ms'),
             )
+            : null,
+          cfg.videoContext !== 'off'
+            ? h('div', { 'data-fa-note': '' }, cfg.videoContext === 'head'
+              ? '只取开头：更省，但长视频后半段的答案会看不到。'
+              : '全片：字幕装得下就给全文；装不下就「开头 ＋ 你评论里提到的那些段 ＋ 结尾」，不会一刀砍掉后半段。')
             : null,
           cfg.videoContext !== 'off'
             ? h('div', { 'data-fa-note': '' }, '字幕是 ASR 转的，会有错别字；没字幕的视频就只看标题，不会卡住。')

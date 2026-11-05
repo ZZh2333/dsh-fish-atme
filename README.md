@@ -264,6 +264,14 @@ ctx.tools.get('bili_subtitle').execute({ bvid })   →  { text }
 「AI 字幕，可能有识别错误；用得上就接着聊，用不上别硬扯」。
 
 - **依赖**：「刷B站」（`dsh-bili-scroll`）。没装/没启用 → 日志提一次，这条退回只看标题，不报错、不卡住。
+- **看多深**（`videoContext`）：
+  - `full`（默认）：字幕装得下就给**全文**；装不下（超 `videoContextMaxChars`，默认 8000 字）就拼
+    「**开头 ＋ 你评论里提到的那些段 ＋ 结尾**」，中间用 `…` 标出跳过处 —— 长视频的答案通常在 60% 之后，
+    一刀砍在开头等于白读。
+  - `head`：只取开头（旧行为，最省）。
+  - `off`：不看，只凭标题回。
+- 「你提到的那些段」怎么找：中文没有分词器，就拿评论的**二字组合**去字幕里找，命中越密集的位置越像你问的那段，
+  取最多 3 段。一个词都没命中（比如只写了「哈哈哈哈」）→ 改成**全片均匀抽样**，中后段也在。
 - **为什么不自己签**：实测直连 `/x/player/v2` 与 `/x/player/wbi/v2`（不带 wbi 签名）**都返回 `subs: 0`** ——
   code 是 0，字幕是空，静默骗人；同一支视频走刷B站的 `bili_subtitle` 能拿到 258 段。所以这里复用它的链路，
   不重复实现签名。
@@ -300,8 +308,8 @@ ctx.tools.get('bili_subtitle').execute({ bvid })   →  { text }
 | `memoryAllowFtsOnly` | bool | `false` | 是否接受「纯关键词命中」（没有余弦相似度，多半是噪音）。默认不接受 |
 | `memoryScope` | string | `global` | 检索范围：`global` / `workspace-first` / `workspace` |
 | `memoryEndpoint` | string | `""` | 检索地址，留空 = `<本机 origin>/api/memory-vector/search` |
-| `videoContext` | `subtitle` \| `off` | `subtitle` | 回复前是否先取字幕看懂视频（调刷B站的 `bili_subtitle`）。没有刷B站时自动退回只看标题 |
-| `videoContextMaxChars` | int | `800` | 字幕节选最多占多少字符 |
+| `videoContext` | `full` \| `head` \| `off` | `full` | 看懂视频的方式：`full` 全片（超长按你的评论挑重点段）、`head` 只取开头、`off` 不看。老值 `subtitle` 等同 `head` |
+| `videoContextMaxChars` | int | `8000` | 字幕最多占多少字符；`full` 模式超了会「开头＋关键词段＋结尾」，不是硬砍 |
 | `videoContextTimeoutMs` | int | `20000` | 等字幕最多等多久，超时就放弃这条的字幕 |
 | `credentialPath` | string | `""` | 凭证文件路径，留空 = `<home>/bili_credential.json` |
 | `home` | string | `""` | 数据目录，留空 = `$DSH_HOME/fish-atme`（默认 `~/.dsh/fish-atme`） |
