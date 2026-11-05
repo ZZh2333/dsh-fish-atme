@@ -2,7 +2,13 @@
  * dsh-fish-atme 离线自测：不碰 B 站，只验纯逻辑 + 请求形状 + 配置接线。
  * 跑法：node tests/offline.mjs
  */
-import { apply, Config, DEFAULTS, name as pluginName, normalizeConfig, __test__ } from '../index.js'
+import fsSync from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { apply, Config, DEFAULTS, name as pluginName, normalizeConfig, createWatcher, __test__ } from '../index.js'
+
+/** 每个用例一个临时目录，跑完就删 */
+const tmpRoot = () => fsSync.mkdtempSync(path.join(os.tmpdir(), 'fish-atme-test-'))
 
 const {
   tidyReply, normalize, postReply, generateReply, resolveHome, allowSet,
@@ -502,6 +508,76 @@ const timersCreated = (fn) => {
     eq('别的源来的请求 403', res.statusCode, 403)
   }
 
+  fsSync.rmSync(home, { recursive: true, force: true })
+}
+
+// ── 定时器整条跑一遍：这个作用域里只有 cfg，写成 config 就会炸 ─────────────
+// 2026-11-05 真炸过：`定时器异常：config is not defined`（createWatcher 里没有 config 这个变量），
+// 表现是日志里一直「查了一次」，某次真有人 @ 时定时器直接报错、一条都不回。
+{
+  const home = path.join(tmpRoot(), 'watch-home')
+  fsSync.rmSync(home, { recursive: true, force: true })
+  fsSync.mkdirSync(home, { recursive: true })
+  fsSync.writeFileSync(path.join(home, 'bili_credential.json'), JSON.stringify({
+    sessdata: 'SESSDATA-VALUE', bili_jct: 'CSRF', dedeuserid: '10000000',
+  }))
+
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url) => {
+    const u = String(url)
+    if (u.includes('/x/msgfeed/at')) {
+      return {
+        ok: true,
+        json: async () => ({
+          code: 0,
+          data: {
+            items: [{
+              user: { nickname: '清涵', mid: 10000000 },
+              item: { source_id: '999', subject_id: '117', uri: 'https://www.bilibili.com/video/av117', title: '旧标题' },
+              reply: { content: { message: '这条视频讲了啥' } },
+            }],
+          },
+        }),
+      }
+    }
+    if (u.includes('/x/web-interface/view')) {
+      return { ok: true, json: async () => ({ code: 0, data: { bvid: 'BV1xx411c7mD', title: '真标题', owner: { name: '某个UP' } } }) }
+    }
+    return { ok: true, json: async () => ({ code: 0, data: {} }) }
+  }
+
+  const cfg = {
+    enabled: true, home, dryRun: true, maxPerDay: 5, minGapMinutes: 1, intervalMinutes: 60,
+    maxChars: 80, allowUids: [], includeOthers: true, provider: 'p', model: 'm',
+    personaSource: 'builtin', personaMode: 'append', personaPrompt: '', keepReplyRules: true,
+    memoryEnabled: false, videoContext: 'subtitle', videoContextMaxChars: 800, videoContextTimeoutMs: 2000,
+  }
+  const ctx = {
+    tools: { get: () => null },      // 没装刷B站 → 只看标题，不该炸
+    effect: () => () => {},
+    llm: {
+      stream: () => (async function* () {
+        yield { type: 'text-delta', index: 0, text: '这条讲的是插件怎么装' }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })(),
+    },
+  }
+  const watcher = createWatcher(ctx, () => cfg)
+  watcher.stop()                      // 别让它真起表
+  let error = null
+  try {
+    await watcher.tick()
+  } catch (thrown) {
+    error = thrown
+  }
+  globalThis.fetch = realFetch
+
+  ok('tick 能整条跑通（作用域里不许出现 config）', error === null, String(error?.message ?? error))
+  // 日志是异步 append（appendFile），立刻读会漏掉最后一行
+  await new Promise((resolve) => setTimeout(resolve, 250))
+  const logText = fsSync.readFileSync(path.join(home, 'fish-atme.log'), 'utf8')
+  ok('dryRun 下写出草稿日志', logText.includes('[dryRun]') || logText.includes('回了'), logText.slice(-300))
+  ok('日志里没有「定时器异常」', !logText.includes('定时器异常'), logText.slice(-300))
   fsSync.rmSync(home, { recursive: true, force: true })
 }
 

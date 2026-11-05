@@ -731,7 +731,7 @@ function compact(value) {
 
 /* ─────────────── 定时器 ─────────────── */
 
-function createWatcher(ctx, getConfig) {
+export function createWatcher(ctx, getConfig) {
   let timer = null
   let kick = null
 
@@ -785,7 +785,7 @@ function createWatcher(ctx, getConfig) {
       agentText: readAgentMd(resolveAgentMdPath(cfg)),
       personaPrompt: cfg.personaPrompt,
       personaMode: cfg.personaMode,
-      keepReplyRules: config.keepReplyRules !== false,
+      keepReplyRules: cfg.keepReplyRules !== false,
     })
     const memory = await fetchMemories(ctx, cfg, `${target.text ?? ''} ${video.title ?? ''}`, log)
     const videoCtx = await fetchVideoContext(ctx, cfg, video.bvid, log)
@@ -863,7 +863,9 @@ function createWatcher(ctx, getConfig) {
 
   start()
   ctx.effect(() => () => stop(), 'dsh-fish-atme: 定时器')
-  return { start, stop, running: () => timer !== null }
+  // tick 也露出来：① 测试能整条跑一遍（这个作用域里只有 cfg，没有 config —— 见 2026-11-05 那次
+  // `定时器异常：config is not defined`）② 以后要做「现在跑一轮」也好接
+  return { start, stop, tick, running: () => timer !== null }
 }
 
 /* ─────────────── 插件入口 ─────────────── */
