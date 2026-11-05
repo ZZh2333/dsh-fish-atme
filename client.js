@@ -111,6 +111,15 @@ window.__ModuleLoader__.load({
         onChange: (e) => onChange(e.target.value),
       })
 
+    // 一组互斥按钮，比 <select> 省样式，也不会在暗色主题下糊成一片
+    const Choices = ({ value, options, onChange }) => h('span', { 'data-fa-row': '', style: { gap: '6px', flexWrap: 'wrap' } },
+      ...options.map(([key, label]) => h('button', {
+        type: 'button',
+        'data-fa-btn': '',
+        ...(value === key ? { 'data-primary': '' } : {}),
+        onClick: () => onChange(key),
+      }, label)))
+
     const Panel = () => {
       const [state, setState] = React.useState(null)
       const [msg, setMsg] = React.useState(null)
@@ -191,6 +200,10 @@ window.__ModuleLoader__.load({
             status.lastText
               ? h('div', { 'data-fa-note': '' }, '最近一条：' + status.lastText)
               : h('div', { 'data-fa-note': '' }, '还没回过东西'),
+            h('div', { 'data-fa-note': '' },
+              `人格：${cfg.personaSource === 'agent-md' ? 'AGENT.md' : '内置底稿'}`
+              + `（${cfg.personaMode === 'replace' ? '整份替换' : '追加'}）`
+              + ` · 记忆：${cfg.memoryEnabled === true ? `开，最多 ${cfg.memoryTopK ?? 3} 条` : '关'}`),
             state?.files?.logFile ? h('div', { 'data-fa-note': '' }, '日志：' + state.files.logFile) : null,
           ),
         ),
@@ -258,16 +271,54 @@ window.__ModuleLoader__.load({
             : null,
         ),
 
-        // ── 语气 ──
+        // ── 人格 ──
         h('div', { 'data-fa-sec': '' },
-          h('div', { 'data-fa-h': '' }, '语气'),
+          h('div', { 'data-fa-h': '' }, '人格'),
+          h('div', { 'data-fa-row': '' },
+            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '底稿从哪来'),
+            h(Choices, {
+              value: cfg.personaSource,
+              options: [['agent-md', 'AGENT.md'], ['builtin', '内置底稿']],
+              onChange: (v) => patch('personaSource', v),
+            }),
+          ),
+          cfg.personaSource === 'agent-md'
+            ? h('div', { 'data-fa-row': '' },
+              h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, 'AGENT.md 路径'),
+              h('span', { 'data-fa-grow': '' },
+                h(Text, {
+                  value: cfg.agentMdPath,
+                  placeholder: status.agentMdResolved ?? '留空 = ~/.dsh/AGENT.md',
+                  onChange: (v) => patch('agentMdPath', v),
+                })),
+            )
+            : null,
+          cfg.personaSource === 'agent-md'
+            ? h('div', { 'data-fa-note': '', ...(status.agentMdChars > 0 ? {} : { 'data-warn': '' }) },
+              status.agentMdChars > 0
+                ? `已读到 AGENT.md：${status.agentMdChars} 字（尾部 memory-vector 托管块已剔除，改文件下一跳自动生效）`
+                : '⚠️ 没读到 AGENT.md，现在会回落内置底稿')
+            : h('div', { 'data-fa-note': '' }, '用源码里的「小肥鱼」底稿：简洁、先给结论、不客套。'),
+          h('div', { 'data-fa-note': '', style: { height: '4px' } }),
+          h('div', { 'data-fa-row': '' },
+            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '下面这段人格怎么用'),
+            h(Choices, {
+              value: cfg.personaMode,
+              options: [['append', '追加在底稿后'], ['replace', '整份替换底稿']],
+              onChange: (v) => patch('personaMode', v),
+            }),
+          ),
           h(Text, {
             value: cfg.personaPrompt,
             multiline: true,
-            placeholder: '追加人格，比如：更贱一点，每条带一个 emoji',
+            placeholder: cfg.personaMode === 'replace'
+              ? '整份人格，比如：你是子非鱼，17 岁，说话简短……'
+              : '追加人格，比如：更贱一点，每条带一个 emoji',
             onChange: (v) => patch('personaPrompt', v),
           }),
-          h('div', { 'data-fa-note': '' }, '接在默认口吻后面。默认是「小肥鱼」：简洁、先给结论、不客套。'),
+          h('div', { 'data-fa-note': '' }, cfg.personaMode === 'replace'
+            ? 'replace：这段直接替换底稿（AGENT.md / 内置都不再用）。留空则回落底稿，不会变成空 prompt。'
+            : 'append：底稿 + 这段，两条都在。'),
           h('div', { 'data-fa-row': '' },
             h('span', { 'data-fa-label': '' }, '模型'),
             h('span', { 'data-fa-grow': '' },
@@ -275,6 +326,50 @@ window.__ModuleLoader__.load({
             h('span', { 'data-fa-num': '' },
               h(Text, { value: cfg.model, placeholder: 'ark-code-latest', onChange: (v) => patch('model', v) })),
           ),
+        ),
+
+        // ── 记忆 ──
+        h('div', { 'data-fa-sec': '' },
+          h('div', { 'data-fa-h': '' }, '记忆'),
+          h('div', { 'data-fa-row': '' },
+            h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '回复前先捞相关旧事（要装 dsh-memory-vector）'),
+            h(Switch, { on: cfg.memoryEnabled === true, onChange: (v) => patch('memoryEnabled', v) }),
+          ),
+          cfg.memoryEnabled === true
+            ? h('div', { 'data-fa-row': '' },
+              h('span', { 'data-fa-label': '' }, '条数'),
+              h(Num, { value: cfg.memoryTopK, min: 1, max: 10, onChange: (v) => patch('memoryTopK', v) }),
+              h('span', { 'data-fa-label': '' }, '字数上限'),
+              h(Num, { value: cfg.memoryMaxChars, min: 0, max: 4000, onChange: (v) => patch('memoryMaxChars', v) }),
+              h('span', { 'data-fa-label': '' }, '相似度 ≥'),
+              h(Num, { value: cfg.memoryMinScore, min: 0, max: 1, onChange: (v) => patch('memoryMinScore', v) }),
+            )
+            : null,
+          cfg.memoryEnabled === true
+            ? h('div', { 'data-fa-row': '' },
+              h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '范围'),
+              h(Choices, {
+                value: cfg.memoryScope,
+                options: [['global', '全局'], ['workspace-first', '本工作区优先'], ['workspace', '只本工作区']],
+                onChange: (v) => patch('memoryScope', v),
+              }),
+            )
+            : null,
+          cfg.memoryEnabled === true
+            ? h('div', { 'data-fa-row': '' },
+              h('span', { 'data-fa-grow': '', 'data-fa-label': '' }, '检索地址'),
+              h('span', { 'data-fa-grow': '' },
+                h(Text, {
+                  value: cfg.memoryEndpoint,
+                  placeholder: status.memoryEndpointResolved || '留空 = 自动找本机 /api/memory-vector/search',
+                  onChange: (v) => patch('memoryEndpoint', v),
+                })),
+            )
+            : null,
+          h('div', { 'data-fa-note': '' },
+            status.memoryEndpointResolved
+              ? `接口：${status.memoryEndpointResolved}（记忆插件的检索会花向量化 token，条数别贪）`
+              : '没找到记忆插件：装了 dsh-memory-vector 才有接口；关着就当没这功能，不影响回复。'),
         ),
 
         // ── 高级 ──
@@ -307,6 +402,14 @@ window.__ModuleLoader__.load({
           h('div', { 'data-fa-note': '' }, `《${draft.video ?? '未知视频'}》`),
           h('div', { 'data-fa-label': '' }, '他写的：' + (draft.hisText ?? '')),
           h('div', { 'data-fa-msg': '' }, '我会回：' + (draft.tidied ?? draft.draft ?? '')),
+          h('div', { 'data-fa-note': '' },
+            `人格：${draft.personaSource === 'agent-md' ? 'AGENT.md' : '内置底稿'}`
+            + (draft.personaChars ? `（${draft.personaChars} 字）` : '')
+            + ` · 记忆：${draft.memoryCount > 0 ? `带上了 ${draft.memoryCount} 条` : '没带'}`),
+          (draft.memories ?? []).length > 0
+            ? h('div', { 'data-fa-note': '' }, '带进 prompt 的记忆：\n' + draft.memories.map((m) => '· ' + m).join('\n'))
+            : null,
+          draft.memoryError ? h('div', { 'data-fa-note': '', 'data-warn': '' }, '记忆检索失败（不影响回复）：' + draft.memoryError) : null,
           h('div', { 'data-fa-note': '' },
             (draft.willSend ? '现在点保存后它会真的发。' : 'dryRun 开着，只写草稿。')
             + (draft.alreadyReplied ? '（这条之前已经回过）' : '')),

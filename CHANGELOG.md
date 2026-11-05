@@ -5,6 +5,52 @@
 
 ---
 
+## [0.3.0] - 2026-11-05
+
+这一版解决「回得像插件，不像我」：**人格可以取 AGENT.md，记忆可以接 dsh-memory-vector。**
+
+### 新增
+
+- **`personaSource`：底稿人格从哪来**
+  `agent-md`（默认）读 `<DSH_HOME>/AGENT.md`，`builtin` 用源码里的「小肥鱼」。
+  按 mtime 缓存重读，改文件下一跳生效；文件不存在 / 为空 → 自动回落 `builtin`，
+  不会因为「没人格」就停摆。
+- **`personaMode`：`personaPrompt` 的用法**
+  `append` 追加在底稿后（旧行为），`replace` **整份替换**底稿。
+  `replace` + 空串会回落底稿 —— 宁可多说一句，也不给模型一个空 system。
+- **记忆：接 `dsh-memory-vector`**
+  回复前拿「他的评论 + 视频标题」查 `POST /api/memory-vector/search`，
+  按 `memoryMinScore` 过滤、`memoryTopK` 限条、`memoryMaxChars` 限字，拼进 user prompt。
+  相关参数：`memoryEnabled`（默认关）/ `memoryTopK` / `memoryMaxChars` /
+  `memoryMinScore` / `memoryScope` / `memoryEndpoint`。
+- **设置页两栏**：「人格」（底稿来源、AGENT.md 路径、append/replace、正文提示、读到多少字）
+  「记忆」（开关、条数、字数、相似度、范围、检索地址、接口是否可达）；草稿预览多显示「人格来源 / 记忆条数 / 带了哪几条」。
+
+### 修复
+
+- **不再把 `AGENT.md` 尾部的 memory-vector 托管快照塞进 system**
+  那段每 21 天变一次、纯给人看的，进 prompt 只烧 token。
+- **记忆里的噪音会先洗掉**：`<compacted-summary>` 压缩摘要、「【记忆·自动回想】」旁注、
+  `你：` / `我：` 回放前缀。
+- **记忆检索失败不抛**：插件没装、接口 404、连接被拒 —— 一律当没有记忆，
+  回复照发，日志最多每小时一行（否则每 5 分钟一行会把真正的问题淹掉）。
+
+### 变更
+
+- `generateReply(llm, system, info, signal)`：第二参改成**外面拼好的整份 system**，
+  人格拼接从它内部搬到 `buildSystemPrompt()`，方便单独测。
+- `bili_at_me_draft` 与 `POST /api/fish-atme/draft` 多返回
+  `personaSource` / `personaChars` / `memoryCount` / `memories`（+ `memoryError`）。
+- `bili_at_me_status` 多返回人格来源与记忆开关状态。
+
+### 测试
+
+- 新增：人格三态（builtin / agent-md / 读不到回落）、append 与 replace、
+  托管块剔除、AGENT.md 读取缓存、记忆裁剪（阈值 / 压缩摘要 / 旁注 / 前缀 / 字符预算）、
+  记忆接口请求形状、检索失败降级、记忆关着不发请求。
+
+---
+
 ## [未发布]
 
 ### 新增

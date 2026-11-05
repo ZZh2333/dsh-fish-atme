@@ -200,6 +200,39 @@ dsh plugin --profile <profile> add dsh-fish-atme
 
 ---
 
+## 人格与记忆
+
+回复的 system prompt 由两件事决定：**底稿**（人格从哪来）+ **记忆**（要不要带旧事）。
+
+### 人格：底稿从哪来
+
+| `personaSource` | 底稿 | 说明 |
+|---|---|---|
+| `agent-md`（默认） | `<DSH_HOME>/AGENT.md` | 按 mtime 重读，改文件下一跳就生效；文件不存在/为空 → 自动回落 `builtin` |
+| `builtin` | 源码里的「小肥鱼」 | 简洁、先给结论、不客套 |
+
+- 尾部 `> 由 dsh-memory-vector 自动维护……` 那段托管快照会被**切掉**：它是给人看的、会变，塞进 system 只烧 token。
+- `personaMode`：`append` = 底稿 + `personaPrompt`；`replace` = `personaPrompt` **整份替换**底稿（`replace` 且 `personaPrompt` 为空 → 回落底稿，不会变成空 prompt）。
+- 读 AGENT.md 是**只读**，插件不会写它、也不会改你的人格设定。
+
+### 记忆：接 dsh-memory-vector
+
+`memoryEnabled: true` 之后，每轮回复前拿「他的评论 + 视频标题」当查询词，打本机的：
+
+```
+POST <本机 origin>/api/memory-vector/search    { query, k, scope }
+```
+
+拿回 `hits[]`，按 `memoryMinScore` 过滤 → `memoryTopK` 限条数 → `memoryMaxChars` 限字数，
+拼成几行塞进 user prompt，并明确写「可能有噪音，只用来接话，别复述」。
+
+- 插件没装 / 接口 404 / 连接被拒 —— **一律当没有记忆**，回复照发；日志最多每小时记一行，不刷屏。
+- 压缩摘要块（`<compacted-summary>`）、「【记忆·自动回想】」旁注、`你：`/`我：` 前缀都会被丢掉，不进 prompt。
+- 检索**要花向量化 token**（查一次 embed 一次），所以默认关；条数别贪，3 条够用。
+- 地址默认从 `ctx.webServer.getOrigin()` 推，也可以用 `memoryEndpoint` 指到别处。
+
+---
+
 ## 配置参数
 
 全部字段都带 `volatile` 标记，改完**下一个查询周期就生效**，不用重启 DSH。
@@ -216,7 +249,16 @@ dsh plugin --profile <profile> add dsh-fish-atme
 | `dryRun` | bool | `false` | 只生成不发送，草稿写进日志 |
 | `provider` | string | `ark-code-latest` | 写回复用哪个 provider 路由 |
 | `model` | string | `ark-code-latest` | 模型 id |
-| `personaPrompt` | string | `""` | 追加口吻，接在默认提示后面（例：`更贱一点，每条带一个 emoji`） |
+| `personaSource` | `agent-md` \| `builtin` | `agent-md` | 底稿人格从哪来：读 `<DSH_HOME>/AGENT.md`，还是用内置「小肥鱼」底稿。**读不到文件自动回落内置**，不会因为没写 AGENT.md 就不回复 |
+| `personaMode` | `append` \| `replace` | `append` | `personaPrompt` 怎么用：接在底稿后面，还是**整份替换**底稿（`replace` + 空串会回落底稿，不会变成空 prompt） |
+| `personaPrompt` | string | `""` | 人格补充/替换（例：`更贱一点，每条带一个 emoji`） |
+| `agentMdPath` | string | `""` | AGENT.md 路径，留空 = `<DSH_HOME>/AGENT.md`（桌面版 `~/.dsh/AGENT.md`） |
+| `memoryEnabled` | bool | `false` | 回复前是否去 `dsh-memory-vector` 捞相关旧事。**默认关**：检索要花向量化 token |
+| `memoryTopK` | int | `3` | 最多带几条记忆进 prompt |
+| `memoryMaxChars` | int | `600` | 记忆正文总字符预算，超了截断 |
+| `memoryMinScore` | number | `0.3` | 相似度下限，低于它不采用 |
+| `memoryScope` | string | `global` | 检索范围：`global` / `workspace-first` / `workspace` |
+| `memoryEndpoint` | string | `""` | 检索地址，留空 = `<本机 origin>/api/memory-vector/search` |
 | `credentialPath` | string | `""` | 凭证文件路径，留空 = `<home>/bili_credential.json` |
 | `home` | string | `""` | 数据目录，留空 = `$DSH_HOME/fish-atme`（默认 `~/.dsh/fish-atme`） |
 
@@ -272,6 +314,9 @@ dsh plugin --profile <profile> add dsh-fish-atme
 | 配置防呆 | `allowUids` 留空时设置页标黄：*「现在只会回你自己 @ 自己」*（这是 0.2.0 加的，踩过坑） |
 | 保存不误伤 | 设置页只提交你**真的动过**的字段，不会把别处改过的配置盖回旧值 |
 | 配置热读 | 每次进设置页接口都重读配置文件，手改 JSON 也不会看到过期值 |
+| 人格只读 | 只读 AGENT.md，从不写；读不到就回落内置底稿，不会因为人格问题停摆 |
+| 记忆可失 | 记忆检索失败一律当没有记忆，`dryRun`/发送链路不受影响 |
+| 记忆不出机 | 记忆检索只打 `127.0.0.1`（`ctx.webServer.getOrigin()`），没有把记忆发到外面的路径 |
 
 建议再叠一层：`intervalMinutes ≥ 5`、`maxPerDay ≤ 5`、先 `dryRun` 跑一天。
 
@@ -280,7 +325,8 @@ dsh plugin --profile <profile> add dsh-fish-atme
 ## 数据与隐私
 
 - 本地只存：凭证（你放的）、去重表、额度、日志。**不上传任何东西**。
-- 请求只发往 `api.bilibili.com`（读 @ 列表、查视频信息、发评论）和你自己的模型 provider。
+- 请求只发往 `api.bilibili.com`（读 @ 列表、查视频信息、发评论）、你自己的模型 provider，以及（仅当 `memoryEnabled`）**本机** `127.0.0.1` 上的记忆插件接口。
+- 会**读** `<DSH_HOME>/AGENT.md`（人格底稿），只读不写。
 - 仓库里**没有**任何 UID、昵称、cookie、API Key；`allowUids` 默认为空。
 - 日志会记录「回了谁、回了什么」——如果日志要分享出去，记得先脱敏。
 
@@ -296,8 +342,13 @@ dsh-fish-atme/
 ├── client.js             # 浏览器半端：设置页那一栏（自注册脚本，非 ESM）
 ├── lib/
 │   └── schema.mjs        # 解析 @deepseek-ai/schemastery（拿不到就降级，不影响插件加载）
+├── scripts/
+│   ├── sanitize-check.mjs # 推送前脱敏体检（cookie / UID / 本机路径 / 明文密钥 / 运行时产物）
+│   └── README.md          # 脱敏规则与上传流程
+├── .githooks/
+│   └── pre-commit         # 提交时自动跑体检（git config core.hooksPath .githooks 启用）
 ├── tests/
-│   └── offline.mjs       # 离线测试：纯函数 / 请求形状 / 配置落盘 / 定时器装卸
+│   └── offline.mjs       # 离线测试：纯函数 / 人格拼接 / 记忆裁剪 / 请求形状 / 配置落盘 / 定时器装卸
 ├── README.md
 └── LICENSE
 ```

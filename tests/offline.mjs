@@ -4,7 +4,10 @@
  */
 import { apply, Config, DEFAULTS, name as pluginName, normalizeConfig, __test__ } from '../index.js'
 
-const { tidyReply, normalize, postReply, generateReply, resolveHome, allowSet } = __test__
+const {
+  tidyReply, normalize, postReply, generateReply, resolveHome, allowSet,
+  stripManagedBlock, buildSystemPrompt, readAgentMd, formatMemories, memoryEndpointOf, fetchMemories,
+} = __test__
 
 let failed = 0
 const ok = (label, cond, extra = '') => {
@@ -16,7 +19,14 @@ const eq = (label, actual, expected) =>
 
 // ── 插件身份：entry id 必须等于 name，否则设置页改不了参数 ──────────────────
 eq('导出 name = fish-atme（要和 patch 里的 id 一致）', pluginName, 'fish-atme')
-ok('导出 Config（有它设置页才认参数）', typeof Config === 'function' && Object.keys(Config.dict ?? {}).length > 0)
+// Config 要靠 @deepseek-ai/schemastery。宿主里解析得到才有字段 schema；纯 node 跑测试时
+// 解析不到，插件按设计降级（设置面板走 /api/fish-atme，不依赖它）——这不算失败，
+// 但「拿到了却不对」必须失败。
+if (Config === undefined) {
+  console.log('⚠️ 跳过 Config 结构检查：这个环境解析不到 @deepseek-ai/schemastery（插件已降级）')
+} else {
+  ok('导出 Config（有它设置页才认参数）', typeof Config === 'function' && Object.keys(Config.dict ?? {}).length > 0)
+}
 
 // ── Config：默认值 + volatile 标记 ────────────────────────────────────────
 // ⚠️ 别用 Config({}) 取默认值：volatile 字段在 schemastery 里解析出来是个空壳，
@@ -30,6 +40,10 @@ if (Config !== undefined) {
   eq('默认 dryRun', def('dryRun'), false)
   eq('默认 includeOthers（陌生人默认不碰）', def('includeOthers'), false)
   eq('默认 allowUids 是空数组', def('allowUids'), [])
+  eq('默认 personaSource = agent-md', def('personaSource'), 'agent-md')
+  eq('默认 personaMode = append', def('personaMode'), 'append')
+  eq('默认记忆关着（不白烧 token）', def('memoryEnabled'), false)
+  eq('默认 memoryTopK', def('memoryTopK'), 3)
 
   // DSH 的 settings.update() 只写 volatile 字段；漏标记 = 设置页报错
   const keys = Object.keys(dict)
@@ -110,12 +124,12 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
   ok('code!=0 时抛错', threw)
 }
 
-// ── generateReply：拼流 + persona 接线 ────────────────────────────────────
+// ── generateReply：拼流 + system 原样透传 + 记忆接进 prompt ────────────────
 {
-  let seenSystem = ''
+  let seen = null
   const fakeLlm = {
     stream: (options) => {
-      seenSystem = options.system
+      seen = options
       return (async function* () {
         yield { type: 'text-delta', index: 0, text: '海底' }
         yield { type: 'text-delta', index: 0, text: '真好看' }
@@ -123,9 +137,144 @@ eq('home 配了就用配的', resolveHome({ home: 'D:/x' }), 'D:/x')
       })()
     },
   }
-  const text = await generateReply(fakeLlm, '更贱一点', { title: 'T', text: 'hi', provider: 'p', model: 'm' }, undefined)
+  const text = await generateReply(fakeLlm, 'SYSTEM-整份', {
+    title: 'T', text: 'hi', provider: 'p', model: 'm', memoryLines: ['他养了只鲸鱼', '他讨厌客套话'],
+  }, undefined)
+  const promptText = (seen?.messages?.[0]?.content ?? []).map((b) => b.text ?? '').join('')
   eq('拼接流', text, '海底真好看')
-  ok('personaPrompt 接到了 system 后面', seenSystem.includes('更贱一点'))
+  eq('system 原样透传（人格在外面拼好）', seen?.system, 'SYSTEM-整份')
+  ok('记忆进了 user prompt', promptText.includes('他养了只鲸鱼') && promptText.includes('他讨厌客套话'))
+  ok('记忆块在正文之前', promptText.indexOf('他养了只鲸鱼') < promptText.indexOf('他在评论里写了'))
+}
+
+{
+  let seen = null
+  const fakeLlm = {
+    stream: (options) => {
+      seen = options
+      return (async function* () { yield { type: 'finish', reason: { kind: 'stop' } } })()
+    },
+  }
+  await generateReply(fakeLlm, '', { title: 'T', text: 'hi', provider: 'p', model: 'm' }, undefined)
+  const promptText = (seen?.messages?.[0]?.content ?? []).map((b) => b.text ?? '').join('')
+  ok('没有记忆时不留空块', !promptText.includes('你记得的相关旧事'))
+  ok('system 空时回落内置底稿', String(seen?.system ?? '').includes('小肥鱼'))
+}
+
+// ── 人格：stripManagedBlock / buildSystemPrompt ───────────────────────────
+{
+  const md = [
+    '# 你是谁',
+    '你是子非鱼。',
+    '',
+    '## 边界',
+    '不编造。',
+    '',
+    '> 由 dsh-memory-vector 自动维护：按「命中次数 × 时间衰减」给记忆排序。',
+    '- 一条记忆',
+  ].join('\n')
+  const stripped = stripManagedBlock(md)
+  ok('切掉 memory-vector 托管块', !stripped.includes('自动维护') && !stripped.includes('一条记忆'))
+  ok('保留正文', stripped.includes('你是子非鱼') && stripped.includes('不编造'))
+
+  const builtin = buildSystemPrompt({ source: 'builtin' })
+  eq('builtin 来源', builtin.source, 'builtin')
+  ok('builtin 用内置底稿', builtin.system.includes('小肥鱼'))
+
+  const fromAgent = buildSystemPrompt({ source: 'agent-md', agentText: md })
+  eq('agent-md 来源', fromAgent.source, 'agent-md')
+  ok('agent-md 用文件正文', fromAgent.system.includes('你是子非鱼') && !fromAgent.system.includes('小肥鱼'))
+
+  const fallback = buildSystemPrompt({ source: 'agent-md', agentText: '' })
+  eq('读不到 AGENT.md 回落 builtin', fallback.source, 'builtin')
+  ok('回落时不炸', fallback.system.includes('小肥鱼'))
+
+  const append = buildSystemPrompt({ source: 'builtin', personaPrompt: '更贱一点', personaMode: 'append' })
+  ok('append：底稿还在', append.system.includes('小肥鱼') && append.system.includes('更贱一点'))
+  const replace = buildSystemPrompt({ source: 'builtin', personaPrompt: '你是子非鱼', personaMode: 'replace' })
+  ok('replace：底稿被顶掉', !replace.system.includes('小肥鱼') && replace.system === '你是子非鱼')
+  const replaceEmpty = buildSystemPrompt({ source: 'builtin', personaPrompt: '   ', personaMode: 'replace' })
+  ok('replace + 空串：不允许空 system（回落底稿）', replaceEmpty.system.includes('小肥鱼'))
+}
+
+// ── 记忆：formatMemories 裁剪规则 ─────────────────────────────────────────
+{
+  const hits = [
+    { text: '主人喜欢大白饭', similarity: 0.9 },
+    { text: '低分的一条', similarity: 0.05 },
+    { text: '我：This is an automatically generated checkpoint condensing', similarity: 0.9 },
+    { text: '你：主人养了只鲸鱼', similarity: 0.8 },
+    { text: '   ', similarity: 0.9 },
+  ]
+  const lines = formatMemories(hits, { maxChars: 600, minScore: 0.3, topK: 5 })
+  ok('低于阈值的丢掉', !lines.some((l) => l.includes('低分')))
+  ok('压缩摘要不进 prompt', !lines.some((l) => l.includes('checkpoint')))
+  ok('空白丢掉', lines.every((l) => l.trim().length > 0))
+  ok('「你：」前缀剥掉', lines.includes('主人养了只鲸鱼'))
+  const withTail = formatMemories(
+    [{ text: '正事要紧 【记忆·自动回想】以下是从过去对话里检索到的相关片段', similarity: 0.9 }],
+    { maxChars: 600, minScore: 0, topK: 3 },
+  )
+  eq('切掉「自动回想」的旁注尾巴', withTail[0], '正事要紧')
+  eq('topK 生效', formatMemories(hits, { maxChars: 600, minScore: 0.3, topK: 1 }).length, 1)
+  const clipped = formatMemories([{ text: '鱼'.repeat(100), similarity: 0.9 }], { maxChars: 20, minScore: 0, topK: 3 })
+  ok('按字符预算截断', clipped[0].length === 20 && clipped[0].endsWith('…'), `len=${clipped[0].length}`)
+}
+
+// ── 记忆：fetchMemories 走 HTTP，形状按 memory-vector 的 /search ────────────
+{
+  let called = null
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async (url, init) => {
+    called = { url: String(url), body: JSON.parse(init.body) }
+    return { ok: true, json: async () => ({ hits: [{ text: '他养了只鲸鱼', similarity: 0.9 }] }) }
+  }
+  const quiet = { memoryEnabled: true, memoryTopK: 2, memoryMaxChars: 100, memoryMinScore: 0.3, memoryScope: 'global', memoryEndpoint: '' }
+  const fakeCtx = { webServer: { getOrigin: () => 'http://127.0.0.1:9999' } }
+  const got = await fetchMemories(fakeCtx, quiet, '海底真好看', () => {})
+  globalThis.fetch = realFetch
+  eq('默认地址 = 本机 origin + /api/memory-vector/search', called?.url, 'http://127.0.0.1:9999/api/memory-vector/search')
+  eq('请求带 query/k/scope', [called?.body.query, called?.body.k, called?.body.scope], ['海底真好看', 2, 'global'])
+  eq('拿回一条', got.lines, ['他养了只鲸鱼'])
+}
+
+{
+  const realFetch = globalThis.fetch
+  globalThis.fetch = async () => { throw new Error('ECONNREFUSED') }
+  const logs = []
+  const got = await fetchMemories(
+    { webServer: { getOrigin: () => 'http://127.0.0.1:9999' } },
+    { memoryEnabled: true, memoryTopK: 3, memoryMaxChars: 100, memoryMinScore: 0, memoryScope: 'global' },
+    'q',
+    (line) => logs.push(line),
+  )
+  globalThis.fetch = realFetch
+  eq('检索失败不抛、返回空', got.lines, [])
+  ok('失败会写一行日志', logs.length === 1 && logs[0].includes('记忆检索'))
+}
+
+{
+  const endpoint = memoryEndpointOf({ webServer: { getOrigin: () => 'http://127.0.0.1:9999/' } }, {})
+  eq('origin 尾部斜杠不会拼出 //', endpoint, 'http://127.0.0.1:9999/api/memory-vector/search')
+  eq('显式配了就用配的', memoryEndpointOf({}, { memoryEndpoint: 'http://127.0.0.1:1/x/' }), 'http://127.0.0.1:1/x')
+  eq('没有 webServer 就返回空', memoryEndpointOf({}, {}), '')
+  const off = await fetchMemories({}, { memoryEnabled: false }, 'q', () => {})
+  eq('记忆关着时一次网络请求都不发', off.lines, [])
+}
+
+// ── 记忆：readAgentMd 缓存 + 读不到返回空 ─────────────────────────────────
+{
+  const fsSync = await import('node:fs')
+  const os = await import('node:os')
+  const path = await import('node:path')
+  const file = path.join(os.tmpdir(), `fish-atme-agent-${process.pid}.md`)
+  fsSync.writeFileSync(file, '# 你是谁\n你是子非鱼。\n\n> 由 dsh-memory-vector 自动维护：x\n- 旧记忆\n')
+  const first = readAgentMd(file)
+  ok('读到正文且不含托管块', first.includes('你是子非鱼') && !first.includes('旧记忆'))
+  eq('重复读走缓存（内容一致）', readAgentMd(file), first)
+  eq('文件不存在返回空串', readAgentMd(path.join(os.tmpdir(), 'fish-atme-not-exist-xyz.md')), '')
+  fsSync.rmSync(file, { force: true })
+  eq('删掉后再读也返回空', readAgentMd(file), '')
 }
 
 // ── apply：注册三个工具 + 定时器按配置开关 ───────────────────────────────
@@ -260,8 +409,10 @@ const timersCreated = (fn) => {
 
 // ── DEFAULTS 完整性 ─────────────────────────────────────────────────────
 eq('DEFAULTS 覆盖关键参数', Object.keys(DEFAULTS).sort(), [
-  'allowUids', 'credentialPath', 'dryRun', 'enabled', 'home', 'includeOthers',
-  'intervalMinutes', 'maxChars', 'maxPerDay', 'minGapMinutes', 'model', 'personaPrompt', 'provider',
+  'agentMdPath', 'allowUids', 'credentialPath', 'dryRun', 'enabled', 'home', 'includeOthers',
+  'intervalMinutes', 'maxChars', 'maxPerDay', 'memoryEnabled', 'memoryEndpoint', 'memoryMaxChars',
+  'memoryMinScore', 'memoryScope', 'memoryTopK', 'minGapMinutes', 'model', 'personaMode',
+  'personaPrompt', 'personaSource', 'provider',
 ].sort())
 
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)

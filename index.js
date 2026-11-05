@@ -16,7 +16,7 @@
  * ============================================================================
  */
 import { readFile, writeFile, appendFile, mkdir } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { readFileSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { loadSchemastery } from './lib/schema.mjs'
@@ -45,7 +45,21 @@ export const DEFAULTS = {
   dryRun: false,
   provider: 'ark-code-latest',
   model: 'ark-code-latest',
+  /** 底稿人格从哪来：agent-md（读 AGENT.md）| builtin（内置小肥鱼） */
+  personaSource: 'agent-md',
+  /** personaPrompt 非空时怎么用：append（接在底稿后）| replace（整份替换） */
+  personaMode: 'append',
   personaPrompt: '',
+  /** AGENT.md 路径。留空 = <DSH_HOME>/AGENT.md（桌面版 = ~/.dsh/AGENT.md） */
+  agentMdPath: '',
+  /** 回复前要不要去 dsh-memory-vector 捞相关旧事 */
+  memoryEnabled: false,
+  memoryTopK: 3,
+  memoryMaxChars: 600,
+  memoryMinScore: 0.3,
+  memoryScope: 'global',
+  /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
+  memoryEndpoint: '',
   credentialPath: '',
   home: '',
 }
@@ -58,6 +72,162 @@ const BASE_PERSONA = [
   '不要复述他的原话，不要长篇大论。一句话到两句话，60 字以内。',
   '只输出回复正文，不要加引号、不要加 @ 前缀。',
 ].join('\n')
+
+/* ─────────────── 人格：底稿从哪来 ─────────────── */
+
+/**
+ * AGENT.md 尾部有一段由 dsh-memory-vector 自动维护的记忆快照（以 `> 由 dsh-memory-vector`
+ * 开头）。那段是给人看的、每 21 天会变，塞进 system 只会白烧 token，直接切掉。
+ */
+export function stripManagedBlock(text) {
+  const lines = String(text ?? '').split(/\r?\n/)
+  const cut = lines.findIndex((line) => /^>\s*由\s*dsh-memory-vector/.test(line))
+  return (cut === -1 ? lines : lines.slice(0, cut)).join('\n').trim()
+}
+
+/** DSH 家目录：优先 DSH_HOME，桌面版就是 ~/.dsh */
+export function dshHomeDir() {
+  return process.env.DSH_HOME || join(homedir(), '.dsh')
+}
+
+export function resolveAgentMdPath(config) {
+  const configured = String(config?.agentMdPath ?? '').trim()
+  return configured || join(dshHomeDir(), 'AGENT.md')
+}
+
+// 读一次缓存一次，按 mtime 判断要不要重读 —— 定时器每 5 分钟一跳，不该每跳都去读盘
+let agentCache = { path: '', mtimeMs: -1, text: '' }
+
+/** 读 AGENT.md（同步 + mtime 缓存）；读不到返回空串，**绝不抛**。 */
+export function readAgentMd(path) {
+  try {
+    const stat = statSync(path)
+    const stale = agentCache.path !== path || agentCache.mtimeMs !== stat.mtimeMs
+    if (stale) {
+      agentCache = { path, mtimeMs: stat.mtimeMs, text: stripManagedBlock(readFileSync(path, 'utf8')) }
+    }
+    return agentCache.text
+  } catch {
+    agentCache = { path, mtimeMs: -1, text: '' }
+    return ''
+  }
+}
+
+/**
+ * 拼最终的 system prompt。
+ *   source=agent-md  → 读 AGENT.md 当底稿；读不到 / 内容空 → 回落内置底稿
+ *   personaMode=append  → personaPrompt 接在底稿后
+ *   personaMode=replace → personaPrompt 整份替换底稿（留空就等于「什么都不要」）
+ * @returns {{ system: string, source: 'builtin'|'agent-md', baseChars: number }}
+ */
+export function buildSystemPrompt(input = {}) {
+  const persona = String(input.personaPrompt ?? '').trim()
+  const wantsReplace = String(input.personaMode ?? 'append').trim().toLowerCase() === 'replace'
+  const wantsAgent = String(input.source ?? 'builtin').trim().toLowerCase() === 'agent-md'
+  const agentText = wantsAgent ? String(input.agentText ?? '').trim() : ''
+  const source = agentText.length > 0 ? 'agent-md' : 'builtin'
+  const base = agentText.length > 0 ? agentText : BASE_PERSONA
+
+  let system
+  if (wantsReplace) system = persona
+  else system = persona.length > 0 ? `${base}\n${persona}` : base
+  if (system.trim().length === 0) system = BASE_PERSONA
+
+  return { system, source, baseChars: system.length }
+}
+
+/* ─────────────── 记忆：去 dsh-memory-vector 捞旧事 ─────────────── */
+
+const MEMORY_PATH = '/api/memory-vector/search'
+
+/** 记忆检索地址：显式配了就用，否则用本机 origin 拼 */
+export function memoryEndpointOf(ctx, config) {
+  const configured = String(config?.memoryEndpoint ?? '').trim()
+  if (configured) return configured.replace(/\/+$/, '')
+  let origin = ''
+  try {
+    if (typeof ctx?.webServer?.getOrigin === 'function') origin = String(ctx.webServer.getOrigin() ?? '')
+  } catch {
+    origin = ''
+  }
+  if (!origin) return ''
+  return `${origin.replace(/\/+$/, '')}${MEMORY_PATH}`
+}
+
+/** 记忆正文里有些块是压缩摘要（照样进了索引），带进 prompt 只会让模型读一堆给自己看的话 */
+function looksLikeCheckpoint(text) {
+  return text.includes('<compacted-summary>') || text.startsWith('我：This is an automatically generated checkpoint')
+}
+
+/**
+ * 把检索结果裁成能进 prompt 的几行。
+ * @returns {string[]} 每行一条记忆（已压成单行、按 maxChars 截断）
+ */
+export function formatMemories(hits, options = {}) {
+  const maxChars = Math.max(0, Number(options.maxChars) || 0)
+  const minScore = Number(options.minScore ?? 0)
+  const topK = Math.max(1, Number(options.topK) || 3)
+  const lines = []
+  let budget = maxChars
+  for (const hit of Array.isArray(hits) ? hits : []) {
+    if (lines.length >= topK || budget <= 0) break
+    const similarity = hit?.similarity
+    if (typeof similarity === 'number' && Number.isFinite(minScore) && similarity < minScore) continue
+    let text = String(hit?.text ?? '').replace(/\s+/g, ' ').trim()
+    if (text === '' || looksLikeCheckpoint(text)) continue
+    // 旧块尾巴上常挂着「【记忆·自动回想】……」——那是当时注入给模型的旁注，不是记忆本身
+    text = text.split('【记忆·自动回想】')[0].trim()
+    if (text === '') continue
+    // 「你：」「我：」是会话回放的痕迹，模型看了会以为在跟自己对台词
+    text = text.replace(/^(?:你|我|助手|用户)[:：]\s*/, '').trim()
+    if (text === '') continue
+    if (text.length > budget) text = `${text.slice(0, Math.max(0, budget - 1))}…`
+    budget -= text.length
+    lines.push(text)
+  }
+  return lines
+}
+
+// 记忆检索失败只吵一次（每小时），否则每 5 分钟一行日志会淹掉真正的东西
+let memoryWarnedAt = 0
+
+/**
+ * 调本机 dsh-memory-vector 的检索接口。任何异常都吞掉并返回 []。
+ * @returns {Promise<{ lines: string[], error?: string }>}
+ */
+async function fetchMemories(ctx, config, query, log) {
+  if (config.memoryEnabled !== true) return { lines: [] }
+  const text = String(query ?? '').trim()
+  if (text === '') return { lines: [] }
+  const endpoint = memoryEndpointOf(ctx, config)
+  if (!endpoint) return { lines: [] }
+  try {
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        query: text.slice(0, 200),
+        k: Math.max(1, Number(config.memoryTopK) || 3),
+        scope: String(config.memoryScope ?? 'global'),
+      }),
+    })
+    if (!response.ok) throw new Error(`HTTP ${response.status}`)
+    const payload = await response.json()
+    const lines = formatMemories(payload?.hits, {
+      maxChars: Number(config.memoryMaxChars) || 0,
+      minScore: Number(config.memoryMinScore),
+      topK: Number(config.memoryTopK) || 3,
+    })
+    return { lines }
+  } catch (error) {
+    const now = Date.now()
+    if (now - memoryWarnedAt > 3_600_000) {
+      memoryWarnedAt = now
+      log?.(`记忆检索没成功（已忽略，不影响回复）：${error?.message ?? error}`)
+    }
+    return { lines: [], error: String(error?.message ?? error) }
+  }
+}
 
 const z = await loadSchemastery()
 
@@ -87,8 +257,26 @@ export const Config = !z ? undefined : z.object({
   provider: z.string().default('ark-code-latest').extra('volatile', true),
   /** 用哪个模型写回复：model id */
   model: z.string().default('ark-code-latest').extra('volatile', true),
-  /** 额外人格：接在默认口吻后面。比如「更贱一点」「每个回复带一个 emoji」 */
+  /** 额外人格：接在底稿后面（personaMode=append）或整份替换（replace） */
   personaPrompt: z.string().default('').extra('volatile', true),
+  /** 底稿人格来源：agent-md = 读 AGENT.md；builtin = 内置小肥鱼 */
+  personaSource: z.string().default('agent-md').extra('volatile', true),
+  /** personaPrompt 的用法：append 追加 / replace 替换整份底稿 */
+  personaMode: z.string().default('append').extra('volatile', true),
+  /** AGENT.md 路径。留空 = <DSH_HOME>/AGENT.md */
+  agentMdPath: z.string().default('').extra('volatile', true),
+  /** 是否在回复前检索 dsh-memory-vector（要那个插件装着才有效） */
+  memoryEnabled: z.boolean().default(false).extra('volatile', true),
+  /** 最多带几条记忆进 prompt */
+  memoryTopK: z.natural().default(3).extra('volatile', true),
+  /** 记忆正文最多占多少字符（超了截断） */
+  memoryMaxChars: z.natural().default(600).extra('volatile', true),
+  /** 相似度下限；低于它的记忆不采用 */
+  memoryMinScore: z.natural().default(0.3).extra('volatile', true),
+  /** 检索范围：global / workspace / workspace-first */
+  memoryScope: z.string().default('global').extra('volatile', true),
+  /** 记忆检索地址。留空 = <本机 origin>/api/memory-vector/search */
+  memoryEndpoint: z.string().default('').extra('volatile', true),
   /** B 站凭证文件路径。留空 = <home>/bili_credential.json */
   credentialPath: z.string().default('').extra('volatile', true),
   /** 数据目录（状态 / 日志 / 凭证都在这儿）。留空 = ~/.dsh/bili-duty */
@@ -165,6 +353,15 @@ export function normalizeConfig(raw) {
   take('provider', (value) => isStr(value) && value.trim().length > 0)
   take('model', (value) => isStr(value) && value.trim().length > 0)
   take('personaPrompt', isStr)
+  take('personaSource', isStr)
+  take('personaMode', isStr)
+  take('agentMdPath', isStr)
+  take('memoryEnabled', isBool)
+  take('memoryTopK', isNum)
+  take('memoryMaxChars', isNum)
+  take('memoryMinScore', isNum)
+  take('memoryScope', isStr)
+  take('memoryEndpoint', isStr)
   take('credentialPath', isStr)
   take('home', isStr)
   return out
@@ -302,20 +499,28 @@ async function postReply({ cookie, csrf, aid, root, message, signal }) {
 
 /* ─────────────── 回复文本 ─────────────── */
 
-async function generateReply(llm, persona, info, signal) {
-  const system = String(persona ?? '').trim() ? `${BASE_PERSONA}\n${String(persona).trim()}` : BASE_PERSONA
-  const prompt = [
+async function generateReply(llm, system, info, signal) {
+  const resolved = String(system ?? '').trim() || BASE_PERSONA
+  const lines = []
+  const memories = Array.isArray(info?.memoryLines) ? info.memoryLines : []
+  if (memories.length > 0) {
+    lines.push('【你记得的相关旧事（可能有噪音，只用来接话；别硬扯，也别复述）】')
+    for (const line of memories) lines.push(`- ${line}`)
+    lines.push('')
+  }
+  lines.push(
     `视频：《${info.title ?? '未知标题'}》${info.owner ? `（UP：${info.owner}）` : ''}`,
     `他在评论里写了：${info.text}`,
     '',
     '给这条 @ 写一句回复。',
-  ].join('\n')
+  )
+  const prompt = lines.join('\n')
   let text = ''
   let failure = ''
   for await (const chunk of llm.stream({
     provider: info.provider,
     model: info.model,
-    system,
+    system: resolved,
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     temperature: 0.8,
     maxTokens: 300,
@@ -413,10 +618,17 @@ function createWatcher(ctx, getConfig) {
     // 接口最新在前；先处理最早那条，免得越堆越多
     const target = fresh[fresh.length - 1]
     const video = await resolveVideo(target.aid, cookie)
+    const persona = buildSystemPrompt({
+      source: cfg.personaSource,
+      agentText: readAgentMd(resolveAgentMdPath(cfg)),
+      personaPrompt: cfg.personaPrompt,
+      personaMode: cfg.personaMode,
+    })
+    const memory = await fetchMemories(ctx, cfg, `${target.text ?? ''} ${video.title ?? ''}`, log)
     const draft = await generateReply(
       ctx.llm,
-      cfg.personaPrompt,
-      { ...target, ...video, provider: cfg.provider, model: cfg.model },
+      persona.system,
+      { ...target, ...video, provider: cfg.provider, model: cfg.model, memoryLines: memory.lines },
       undefined,
     )
     const message = tidyReply(draft, maxChars)
@@ -628,10 +840,17 @@ export function apply(ctx, rawConfig = {}) {
       const target = wanted ? items.find((item) => item.rpid === wanted) : fallback ?? items[0]
       if (!target) throw new Error('没找到这条 @（rpid 对不上？先跑一次 bili_at_me 看看）')
       const video = await resolveVideo(target.aid, cookie, exec.signal)
+      const persona = buildSystemPrompt({
+        source: config.personaSource,
+        agentText: readAgentMd(resolveAgentMdPath(config)),
+        personaPrompt: config.personaPrompt,
+        personaMode: config.personaMode,
+      })
+      const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
       const draft = await generateReply(
         ctx.llm,
-        config.personaPrompt,
-        { ...target, ...video, provider: config.provider, model: config.model },
+        persona.system,
+        { ...target, ...video, provider: config.provider, model: config.model, memoryLines: memory.lines },
         exec.signal,
       )
       return compact({
@@ -642,6 +861,9 @@ export function apply(ctx, rawConfig = {}) {
         draft,
         tidied: tidyReply(draft, Math.max(20, Number(config.maxChars) || DEFAULTS.maxChars)),
         willSend: config.dryRun !== true,
+        personaSource: persona.source,
+        memoryCount: memory.lines.length,
+        memories: memory.lines,
       })
     },
   })
@@ -661,6 +883,8 @@ export function apply(ctx, rawConfig = {}) {
             `定时器：${value.enabled ? `开（每 ${value.intervalMinutes} 分钟）` : '关'}`,
             `今天：${value.count}/${value.maxPerDay} 条${value.dryRun ? '（dryRun，只写草稿）' : ''}`,
             `去重表：${value.seenCount} 条`,
+            `人格：${value.personaSource === 'agent-md' ? `AGENT.md（${value.personaChars} 字）` : '内置底稿'} · ${value.personaMode === 'replace' ? 'personaPrompt 替换底稿' : 'personaPrompt 追加'}`,
+            `记忆：${value.memoryEnabled ? (value.memoryEndpoint ? `开（topK ${value.memoryTopK}）` : '开，但找不到检索地址') : '关'}`,
             `最近一条：${value.lastText ?? '(无)'}`,
             `状态文件：${value.stateFile}`,
             `日志：${value.logFile}`,
@@ -682,6 +906,22 @@ export function apply(ctx, rawConfig = {}) {
         count: state.day === dayKey() ? Number(state.count || 0) : 0,
         seenCount: entries.length,
         lastText: last?.text,
+        personaSource: buildSystemPrompt({
+          source: config.personaSource,
+          agentText: readAgentMd(resolveAgentMdPath(config)),
+          personaPrompt: config.personaPrompt,
+          personaMode: config.personaMode,
+        }).source,
+        personaMode: String(config.personaMode ?? DEFAULTS.personaMode),
+        personaChars: buildSystemPrompt({
+          source: config.personaSource,
+          agentText: readAgentMd(resolveAgentMdPath(config)),
+          personaPrompt: config.personaPrompt,
+          personaMode: config.personaMode,
+        }).baseChars,
+        memoryEnabled: config.memoryEnabled === true,
+        memoryTopK: Number(config.memoryTopK) || DEFAULTS.memoryTopK,
+        memoryEndpoint: memoryEndpointOf(ctx, config),
         stateFile,
         logFile,
       })
@@ -802,6 +1042,15 @@ export function apply(ctx, rawConfig = {}) {
         provider: config.provider,
         model: config.model,
         personaPrompt: config.personaPrompt ?? '',
+        personaSource: config.personaSource ?? DEFAULTS.personaSource,
+        personaMode: config.personaMode ?? DEFAULTS.personaMode,
+        agentMdPath: config.agentMdPath ?? '',
+        memoryEnabled: config.memoryEnabled === true,
+        memoryTopK: config.memoryTopK,
+        memoryMaxChars: config.memoryMaxChars,
+        memoryMinScore: config.memoryMinScore,
+        memoryScope: config.memoryScope ?? DEFAULTS.memoryScope,
+        memoryEndpoint: config.memoryEndpoint ?? '',
         credentialPath: config.credentialPath ?? '',
         home: config.home ?? '',
       },
@@ -812,6 +1061,10 @@ export function apply(ctx, rawConfig = {}) {
         lastAt: Number(state.lastAt || 0),
         timerRunning: watcher ? watcher.running() : false,
         lastText: entries.length > 0 ? entries[entries.length - 1][1]?.text : undefined,
+        // 让设置页知道「人格到底从哪来、记忆接口找不找得到」，不用去翻日志
+        agentMdResolved: resolveAgentMdPath(config),
+        agentMdChars: readAgentMd(resolveAgentMdPath(config)).length,
+        memoryEndpointResolved: memoryEndpointOf(ctx, config),
       },
       logTail: await readLogTail(),
       files: { stateFile, logFile, configFile },
@@ -852,10 +1105,17 @@ export function apply(ctx, rawConfig = {}) {
       const target = items.find((item) => allowed.has(String(item.mid))) ?? items[0]
       if (!target) return sendJson(res, 200, { ok: false, error: '现在没有 @ 可以拿来试' })
       const video = await resolveVideo(target.aid, cookie)
+      const persona = buildSystemPrompt({
+        source: config.personaSource,
+        agentText: readAgentMd(resolveAgentMdPath(config)),
+        personaPrompt: config.personaPrompt,
+        personaMode: config.personaMode,
+      })
+      const memory = await fetchMemories(ctx, config, `${target.text ?? ''} ${video.title ?? ''}`, log)
       const draft = await generateReply(
         ctx.llm,
-        config.personaPrompt,
-        { ...target, ...video, provider: config.provider, model: config.model },
+        persona.system,
+        { ...target, ...video, provider: config.provider, model: config.model, memoryLines: memory.lines },
         undefined,
       )
       return sendJson(res, 200, {
@@ -866,6 +1126,11 @@ export function apply(ctx, rawConfig = {}) {
         tidied: tidyReply(draft, Math.max(20, Number(config.maxChars) || DEFAULTS.maxChars)),
         alreadyReplied: Boolean(state.seen?.[target.rpid]),
         willSend: config.dryRun !== true,
+        personaSource: persona.source,
+        personaChars: persona.baseChars,
+        memoryCount: memory.lines.length,
+        memories: memory.lines,
+        memoryError: memory.error,
       })
     }
 
@@ -895,4 +1160,8 @@ export function apply(ctx, rawConfig = {}) {
 }
 
 // 测试出口（宿主不读它）
-export const __test__ = { tidyReply, normalize, postReply, generateReply, resolveHome, allowSet, DEFAULTS }
+export const __test__ = {
+  tidyReply, normalize, postReply, generateReply, resolveHome, allowSet, DEFAULTS,
+  stripManagedBlock, buildSystemPrompt, readAgentMd, resolveAgentMdPath, dshHomeDir,
+  formatMemories, memoryEndpointOf, fetchMemories,
+}

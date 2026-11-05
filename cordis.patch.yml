@@ -19,3 +19,8 @@
         minGapMinutes: 10
         maxChars: 80
         dryRun: false
+        # 人格底稿：agent-md = 读 <DSH_HOME>/AGENT.md（读不到自动回落内置底稿）
+        personaSource: agent-md
+        personaMode: append
+        # 记忆默认关：检索要花向量化 token，要用了再开
+        memoryEnabled: false
